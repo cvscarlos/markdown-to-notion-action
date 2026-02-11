@@ -95,6 +95,13 @@ const ALLOWED_CODE_LANGUAGES = new Set([
   "yaml",
 ]);
 
+const TABLE_OF_CONTENTS_LABELS = new Set([
+  "table of contents",
+  "table of content",
+  "table of contentes",
+  "toc",
+]);
+
 export function extractTitle(markdown: string): string | null {
   const tokens = md.parse(markdown, {});
   for (let i = 0; i < tokens.length; i += 1) {
@@ -112,18 +119,23 @@ export function extractTitle(markdown: string): string | null {
   return null;
 }
 
+type ParseState = {
+  index: number;
+  skipNextList?: boolean;
+};
+
 export function markdownToNotionBlocks(
   markdown: string,
   options: MarkdownToNotionOptions = {},
 ): BlockObjectRequest[] {
   const tokens = md.parse(markdown, {});
-  const state = { index: 0 };
+  const state: ParseState = { index: 0 };
   return parseTokens(tokens, state, options);
 }
 
 function parseTokens(
   tokens: Token[],
-  state: { index: number },
+  state: ParseState,
   options: MarkdownToNotionOptions,
   stopOnTypes: string[] = [],
 ): BlockObjectRequest[] {
@@ -135,6 +147,14 @@ function parseTokens(
       break;
     }
 
+    if (
+      state.skipNextList &&
+      token.type !== "bullet_list_open" &&
+      token.type !== "ordered_list_open"
+    ) {
+      state.skipNextList = false;
+    }
+
     switch (token.type) {
       case "heading_open": {
         const level = parseHeadingLevel(token.tag);
@@ -143,10 +163,20 @@ function parseTokens(
           inline && inline.type === "inline" ? inlineToRichText(inline, options) : [];
         blocks.push(...createHeadingBlocks(level, richText));
         state.index += 3;
+        if (inline && inline.type === "inline" && isTableOfContentsLabel(inline.content)) {
+          blocks.push(createTableOfContentsBlock());
+          state.skipNextList = true;
+        }
         break;
       }
       case "paragraph_open": {
         const inline = tokens[state.index + 1];
+        if (inline && inline.type === "inline" && isTableOfContentsLabel(inline.content)) {
+          blocks.push(createTableOfContentsBlock());
+          state.index += 3;
+          state.skipNextList = true;
+          break;
+        }
         const richText =
           inline && inline.type === "inline" ? inlineToRichText(inline, options) : [];
         blocks.push(...createParagraphBlocks(richText));
@@ -155,12 +185,27 @@ function parseTokens(
       }
       case "bullet_list_open": {
         state.index += 1;
+        if (state.skipNextList) {
+          parseList(tokens, state, "bulleted", options);
+          state.skipNextList = false;
+          break;
+        }
         blocks.push(...parseList(tokens, state, "bulleted", options));
         break;
       }
       case "ordered_list_open": {
         state.index += 1;
+        if (state.skipNextList) {
+          parseList(tokens, state, "numbered", options);
+          state.skipNextList = false;
+          break;
+        }
         blocks.push(...parseList(tokens, state, "numbered", options));
+        break;
+      }
+      case "table_open": {
+        state.index += 1;
+        blocks.push(...parseTable(tokens, state, options));
         break;
       }
       case "fence": {
@@ -203,7 +248,7 @@ function parseTokens(
 
 function parseList(
   tokens: Token[],
-  state: { index: number },
+  state: ParseState,
   listType: "bulleted" | "numbered",
   options: MarkdownToNotionOptions,
 ): BlockObjectRequest[] {
@@ -247,9 +292,156 @@ function parseList(
   return blocks;
 }
 
+function parseTable(
+  tokens: Token[],
+  state: ParseState,
+  options: MarkdownToNotionOptions,
+): BlockObjectRequest[] {
+  const rows: RichTextItemRequest[][][] = [];
+  let inHead = false;
+  let hasColumnHeader = false;
+
+  while (state.index < tokens.length) {
+    const token = tokens[state.index];
+    if (token.type === "table_close") {
+      state.index += 1;
+      break;
+    }
+
+    switch (token.type) {
+      case "thead_open":
+        inHead = true;
+        state.index += 1;
+        break;
+      case "thead_close":
+        inHead = false;
+        state.index += 1;
+        break;
+      case "tbody_open":
+      case "tbody_close":
+        state.index += 1;
+        break;
+      case "tr_open": {
+        state.index += 1;
+        const row = parseTableRow(tokens, state, options);
+        if (row.length > 0) {
+          rows.push(row);
+          if (inHead) {
+            hasColumnHeader = true;
+          }
+        }
+        break;
+      }
+      default:
+        state.index += 1;
+        break;
+    }
+  }
+
+  if (rows.length === 0) {
+    return [];
+  }
+
+  const tableWidth = Math.max(...rows.map((row) => row.length));
+  if (tableWidth === 0) {
+    return [];
+  }
+
+  const normalizedRows = rows.map((row) => {
+    const padded = [...row];
+    while (padded.length < tableWidth) {
+      padded.push([]);
+    }
+    return padded;
+  });
+
+  const tableRows: BlockObjectRequest[] = normalizedRows.map((row) => ({
+    type: "table_row",
+    table_row: {
+      cells: row.map((cell) => normalizeRichTextForCell(cell)),
+    },
+  }));
+
+  return [
+    {
+      type: "table",
+      table: {
+        table_width: tableWidth,
+        has_column_header: hasColumnHeader,
+        has_row_header: false,
+        children: tableRows,
+      },
+    },
+  ];
+}
+
+function parseTableRow(
+  tokens: Token[],
+  state: ParseState,
+  options: MarkdownToNotionOptions,
+): RichTextItemRequest[][] {
+  const cells: RichTextItemRequest[][] = [];
+
+  while (state.index < tokens.length) {
+    const token = tokens[state.index];
+    if (token.type === "tr_close") {
+      state.index += 1;
+      break;
+    }
+
+    if (token.type === "th_open" || token.type === "td_open") {
+      state.index += 1;
+      const cell = parseTableCell(tokens, state, options, token.type === "th_open");
+      cells.push(cell);
+      continue;
+    }
+
+    state.index += 1;
+  }
+
+  return cells;
+}
+
+function parseTableCell(
+  tokens: Token[],
+  state: ParseState,
+  options: MarkdownToNotionOptions,
+  isHeader: boolean,
+): RichTextItemRequest[] {
+  const richText: RichTextItemRequest[] = [];
+  const closeType = isHeader ? "th_close" : "td_close";
+
+  while (state.index < tokens.length) {
+    const token = tokens[state.index];
+    if (token.type === closeType) {
+      state.index += 1;
+      break;
+    }
+
+    if (token.type === "inline") {
+      richText.push(...inlineToRichText(token, options));
+      state.index += 1;
+      continue;
+    }
+
+    if (token.type === "paragraph_open") {
+      const inline = tokens[state.index + 1];
+      if (inline && inline.type === "inline") {
+        richText.push(...inlineToRichText(inline, options));
+      }
+      state.index += 3;
+      continue;
+    }
+
+    state.index += 1;
+  }
+
+  return normalizeRichTextForCell(richText);
+}
+
 function parseListItem(
   tokens: Token[],
-  state: { index: number },
+  state: ParseState,
   options: MarkdownToNotionOptions,
 ): { richText: RichTextItemRequest[]; children: BlockObjectRequest[] } {
   let richText: RichTextItemRequest[] = [];
@@ -283,6 +475,11 @@ function parseListItem(
       case "ordered_list_open": {
         state.index += 1;
         children.push(...parseList(tokens, state, "numbered", options));
+        break;
+      }
+      case "table_open": {
+        state.index += 1;
+        children.push(...parseTable(tokens, state, options));
         break;
       }
       case "fence": {
@@ -500,6 +697,27 @@ function parseHeadingLevel(tag: string): 1 | 2 | 3 {
   return 3;
 }
 
+function isTableOfContentsLabel(text: string): boolean {
+  const normalized = text
+    .trim()
+    .toLowerCase()
+    .replace(/^\[/, "")
+    .replace(/\]$/, "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return TABLE_OF_CONTENTS_LABELS.has(normalized);
+}
+
+function createTableOfContentsBlock(): BlockObjectRequest {
+  return {
+    type: "table_of_contents",
+    table_of_contents: {
+      color: "default",
+    },
+  };
+}
+
 function normalizeCodeLanguage(info: string): string {
   const raw = info.trim().toLowerCase();
   if (raw.length === 0) {
@@ -578,6 +796,40 @@ function splitRichTextByLength(richText: RichTextItemRequest[]): RichTextItemReq
   }
 
   return chunks;
+}
+
+function normalizeRichTextForCell(
+  richText: RichTextItemRequest[],
+): RichTextItemRequest[] {
+  const normalized: RichTextItemRequest[] = [];
+
+  for (const item of richText) {
+    if (item.type !== "text") {
+      normalized.push(item);
+      continue;
+    }
+
+    const content = item.text.content || "";
+    if (content.length === 0) {
+      normalized.push(item);
+      continue;
+    }
+
+    let remaining = content;
+    while (remaining.length > 0) {
+      const slice = remaining.slice(0, MAX_TEXT_LENGTH);
+      normalized.push({
+        ...item,
+        text: {
+          ...item.text,
+          content: slice,
+        },
+      });
+      remaining = remaining.slice(slice.length);
+    }
+  }
+
+  return normalized;
 }
 
 function splitTextByLength(text: string): string[] {

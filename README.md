@@ -125,6 +125,8 @@ Supported conversions include:
 - Code fences
 - Blockquotes (paragraphs inside)
 - Horizontal rules
+- Tables
+- `Table of Contents` / `[TOC]` placeholders → Notion `table_of_contents` block
 
 **Safety rules:**
 

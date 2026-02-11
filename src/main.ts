@@ -2,7 +2,9 @@ import * as core from "@actions/core";
 import { Client } from "@notionhq/client";
 import type {
   BlockObjectRequest,
+  BlockObjectResponse,
   PartialBlockObjectResponse,
+  RichTextItemRequest,
 } from "@notionhq/client/build/src/api-endpoints";
 import fm from "front-matter";
 import dotenv from "dotenv";
@@ -343,6 +345,22 @@ async function updateIndexBlock(
   indexBlockId: string,
   documents: SyncResult[],
 ): Promise<void> {
+  const block = await notion.blocks.retrieve({ block_id: toDashedId(indexBlockId) });
+  if (!("type" in block)) {
+    core.warning("Unable to resolve index block type. Skipping index update.");
+    return;
+  }
+
+  if (!blockSupportsChildren(block.type)) {
+    const updated = await updateIndexInline(notion, block as BlockObjectResponse, documents);
+    if (!updated) {
+      core.warning(
+        `Index block type '${block.type}' does not support children. Skipping index update.`,
+      );
+    }
+    return;
+  }
+
   await clearChildren(notion, indexBlockId);
 
   const listBlocks: BlockObjectRequest[] = [];
@@ -383,6 +401,132 @@ function splitText(text: string, maxLength: number): string[] {
     remaining = remaining.slice(maxLength);
   }
   return chunks;
+}
+
+function blockSupportsChildren(type: string): boolean {
+  return [
+    "toggle",
+    "to_do",
+    "bulleted_list_item",
+    "numbered_list_item",
+    "callout",
+    "quote",
+    "synced_block",
+  ].includes(type);
+}
+
+function blockSupportsInlineRichText(type: string): boolean {
+  return [
+    "paragraph",
+    "heading_1",
+    "heading_2",
+    "heading_3",
+    "callout",
+    "toggle",
+    "bulleted_list_item",
+    "numbered_list_item",
+    "to_do",
+    "quote",
+  ].includes(type);
+}
+
+async function updateIndexInline(
+  notion: Client,
+  block: BlockObjectResponse,
+  documents: SyncResult[],
+): Promise<boolean> {
+  if (!blockSupportsInlineRichText(block.type)) {
+    return false;
+  }
+
+  const existingText = extractPlainText(block);
+  const baseText = existingText.split("\n")[0].trim();
+  const richText = buildInlineIndexRichText(baseText, documents);
+
+  const blockValue = (block as Record<string, any>)[block.type];
+  const updateValue: Record<string, unknown> = {
+    rich_text: richText,
+  };
+
+  if (blockValue?.color) {
+    updateValue.color = blockValue.color;
+  }
+  if (block.type === "callout" && blockValue?.icon) {
+    updateValue.icon = blockValue.icon;
+  }
+  if (block.type === "to_do" && typeof blockValue?.checked === "boolean") {
+    updateValue.checked = blockValue.checked;
+  }
+  if (
+    (block.type === "heading_1" ||
+      block.type === "heading_2" ||
+      block.type === "heading_3") &&
+    typeof blockValue?.is_toggleable === "boolean"
+  ) {
+    updateValue.is_toggleable = blockValue.is_toggleable;
+  }
+
+  await notion.blocks.update({
+    block_id: toDashedId(block.id),
+    [block.type]: updateValue,
+  });
+
+  core.warning(
+    `Index block type '${block.type}' does not support children. Wrote list inline instead.`,
+  );
+  return true;
+}
+
+function extractPlainText(block: BlockObjectResponse): string {
+  const blockValue = (block as Record<string, any>)[block.type];
+  if (!blockValue || !Array.isArray(blockValue.rich_text)) {
+    return "";
+  }
+  return blockValue.rich_text
+    .map((item: { plain_text?: string; text?: { content?: string } }) => {
+      if (typeof item.plain_text === "string") {
+        return item.plain_text;
+      }
+      return item.text?.content ?? "";
+    })
+    .join("");
+}
+
+function buildInlineIndexRichText(
+  baseText: string,
+  documents: SyncResult[],
+): RichTextItemRequest[] {
+  const richText: RichTextItemRequest[] = [];
+
+  if (baseText.length > 0) {
+    richText.push({
+      type: "text",
+      text: { content: baseText },
+    });
+  }
+
+  for (const doc of documents) {
+    const prefix = `${baseText.length > 0 || richText.length > 0 ? "\n" : ""}• `;
+    richText.push({
+      type: "text",
+      text: { content: prefix },
+    });
+    const chunks = splitText(doc.title, 2000);
+    if (chunks.length === 0) {
+      continue;
+    }
+    for (const chunk of chunks) {
+      richText.push({
+        type: "text",
+        text: {
+          content: chunk,
+          link: { url: doc.url },
+        },
+      });
+    }
+  }
+
+  return richText;
 }
 
 async function clearChildren(notion: Client, blockId: string): Promise<void> {
