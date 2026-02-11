@@ -1,0 +1,47 @@
+name: "Markdown to Notion"
+description: "Syncs Markdown files to Notion pages and updates an index block."
+inputs:
+  notion_token:
+    description: "Notion Integration Secret"
+    required: true
+
+  docs_folder:
+    description: "Path to folder containing markdown files"
+    required: true
+
+  index_block_id:
+    description: "Notion block ID or block URL for the index list container"
+    required: false
+
+  parent_page_id:
+    description: "Notion page ID where files will be created when index_block_id is not provided"
+    required: false
+
+  github_token:
+    description: "GitHub token used to commit notion_page_id updates"
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install dependencies
+      run: npm install
+      shell: bash
+      working-directory: ${{ github.action_path }}
+
+    - name: Sync markdown to Notion
+      run: npx tsx src/main.ts
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      env:
+        INPUT_NOTION_TOKEN: ${{ inputs.notion_token }}
+        INPUT_DOCS_FOLDER: ${{ inputs.docs_folder }}
+        INPUT_INDEX_BLOCK_ID: ${{ inputs.index_block_id }}
+        INPUT_PARENT_PAGE_ID: ${{ inputs.parent_page_id }}
+        INPUT_GITHUB_TOKEN: ${{ inputs.github_token }}
+
+        NOTION_TOKEN: ${{ inputs.notion_token }}
+        DOCS_FOLDER: ${{ inputs.docs_folder }}
+        INDEX_BLOCK_ID: ${{ inputs.index_block_id }}
+        PARENT_PAGE_ID: ${{ inputs.parent_page_id }}
+        GITHUB_TOKEN: ${{ inputs.github_token }}
