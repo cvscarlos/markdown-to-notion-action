@@ -52,7 +52,8 @@ async function run(): Promise<void> {
 
     const notion = new Client({ auth: notionToken });
 
-    const docsFolderPath = path.resolve(process.cwd(), docsFolder);
+    const workspaceRoot = process.env.GITHUB_WORKSPACE || process.cwd();
+    const docsFolderPath = path.resolve(workspaceRoot, docsFolder);
     await ensureDirectoryExists(docsFolderPath);
 
     const indexBlockId = indexBlockInput ? normalizeNotionId(indexBlockInput) : null;
@@ -109,7 +110,7 @@ async function run(): Promise<void> {
           );
           if (updatedContent !== doc.rawContent) {
             await fs.writeFile(doc.absPath, updatedContent, "utf8");
-            changedFiles.push(path.relative(process.cwd(), doc.absPath));
+            changedFiles.push(path.relative(workspaceRoot, doc.absPath));
           }
         }
 
@@ -137,8 +138,12 @@ async function run(): Promise<void> {
     }
 
     if (changedFiles.length > 0) {
-      await commitAndPush(changedFiles, "chore: store notion page ids", githubToken, (message) =>
-        core.info(message),
+      await commitAndPush(
+        changedFiles,
+        "chore: store notion page ids",
+        githubToken,
+        (message) => core.info(message),
+        workspaceRoot,
       );
     }
   } catch (error) {

@@ -91,7 +91,7 @@ jobs:
 | Input            | Required | Description                                                                                               |
 | ---------------- | -------- | --------------------------------------------------------------------------------------------------------- |
 | `notion_token`   | Yes      | Notion Integration Secret.                                                                                |
-| `docs_folder`    | Yes      | Folder containing Markdown files (e.g., `docs`).                                                          |
+| `docs_folder`    | Yes      | Folder containing Markdown files (relative to the repository root).                                       |
 | `index_block_id` | No       | Block ID/URL for the index list container. If provided, the index block is cleared and rebuilt every run. |
 | `parent_page_id` | No       | Parent page ID/URL for new pages (used when `index_block_id` is not provided).                            |
 | `github_token`   | Yes      | GitHub token used to commit `notion_page_id` back to files.                                               |
