@@ -31,13 +31,6 @@ type DocEntry = {
   notionUrl?: string;
 };
 
-type SyncResult = {
-  title: string;
-  pageId: string;
-  url: string;
-  filePath: string;
-};
-
 type CommitStrategy = "push" | "pr" | "none";
 
 async function run(): Promise<void> {
@@ -97,8 +90,6 @@ async function run(): Promise<void> {
     }
 
     const changedFiles: string[] = [];
-    const syncedDocs: SyncResult[] = [];
-    const folderPageCache = new Map<string, string>();
 
     for (const doc of documents) {
       try {
@@ -154,24 +145,10 @@ async function run(): Promise<void> {
 
         if (pageId && pageUrl) {
           knownPageUrls.set(doc.absPath, pageUrl);
-          syncedDocs.push({
-            title: effectiveTitle,
-            pageId,
-            url: pageUrl,
-            filePath: doc.absPath,
-          });
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         core.warning(`Failed to sync ${doc.relPath}: ${message}`);
-      }
-    }
-
-    if (indexBlockId) {
-      if (syncedDocs.length > 0) {
-        await updateIndexBlock(notion, indexBlockId, syncedDocs);
-      } else {
-        core.warning("No documents were synced. Skipping index update.");
       }
     }
 
@@ -383,78 +360,6 @@ async function createPage(
   };
 }
 
-async function resolveFolderParentPage(
-  notion: Client,
-  rootPageId: string,
-  relPath: string,
-  cache: Map<string, string>,
-): Promise<string> {
-  const folderPath = normalizeFolderPath(relPath);
-  if (!folderPath) {
-    return rootPageId;
-  }
-
-  const segments = folderPath.split("/");
-  let currentParentId = rootPageId;
-  let currentPath = "";
-
-  for (const segment of segments) {
-    if (!segment) {
-      continue;
-    }
-    currentPath = currentPath ? `${currentPath}/${segment}` : segment;
-    const cached = cache.get(currentPath);
-    if (cached) {
-      currentParentId = cached;
-      continue;
-    }
-
-    const pageId = await findOrCreateChildPage(notion, currentParentId, segment);
-    cache.set(currentPath, pageId);
-    currentParentId = pageId;
-  }
-
-  return currentParentId;
-}
-
-async function findOrCreateChildPage(
-  notion: Client,
-  parentPageId: string,
-  title: string,
-): Promise<string> {
-  const existing = await findChildPageByTitle(notion, parentPageId, title);
-  if (existing) {
-    return existing;
-  }
-
-  const created = await notion.pages.create({
-    parent: { page_id: toDashedId(parentPageId) },
-    properties: buildTitleProperty(title),
-  });
-  return normalizeNotionId(created.id);
-}
-
-async function findChildPageByTitle(
-  notion: Client,
-  parentPageId: string,
-  title: string,
-): Promise<string | null> {
-  const children = await listAllChildren(notion, parentPageId);
-  for (const child of children) {
-    if (!("type" in child)) {
-      continue;
-    }
-    if (child.type !== "child_page") {
-      continue;
-    }
-    const childTitle = (child as { child_page?: { title?: string } }).child_page?.title;
-    if (childTitle === title) {
-      return normalizeNotionId(child.id);
-    }
-  }
-  return null;
-}
-
 async function updatePageContent(
   notion: Client,
   pageId: string,
@@ -576,77 +481,6 @@ async function persistNotionIds(
   });
 
   core.info(`Opened PR: ${pr.data.html_url}`);
-}
-
-async function updateIndexBlock(
-  notion: Client,
-  indexBlockId: string,
-  documents: SyncResult[],
-): Promise<void> {
-  const block = await notion.blocks.retrieve({ block_id: toDashedId(indexBlockId) });
-  if (!("type" in block)) {
-    core.warning("Unable to resolve index block type. Skipping index update.");
-    return;
-  }
-
-  if (!blockSupportsChildren(block.type)) {
-    throw new Error(
-      `Index block type '${block.type}' does not support children. Choose a block that supports children (toggle/callout/list/quote).`,
-    );
-  }
-
-  await clearChildren(notion, indexBlockId);
-
-  const listBlocks: NotionBlock[] = [];
-  for (const doc of documents) {
-    listBlocks.push(...buildIndexListItemBlocks(doc.title, doc.url));
-  }
-
-  await appendBlocksSafe(notion, indexBlockId, listBlocks, (msg) => core.warning(msg));
-}
-
-function buildIndexListItemBlocks(title: string, url: string): NotionBlock[] {
-  const chunks = splitText(title, 2000);
-  return chunks.map((chunk) => ({
-    type: "bulleted_list_item",
-    bulleted_list_item: {
-      rich_text: [
-        {
-          type: "text",
-          text: {
-            content: chunk,
-            link: { url },
-          },
-        },
-      ],
-      color: "default",
-    },
-  }));
-}
-
-function splitText(text: string, maxLength: number): string[] {
-  if (text.length <= maxLength) {
-    return [text];
-  }
-  const chunks: string[] = [];
-  let remaining = text;
-  while (remaining.length > 0) {
-    chunks.push(remaining.slice(0, maxLength));
-    remaining = remaining.slice(maxLength);
-  }
-  return chunks;
-}
-
-function blockSupportsChildren(type: string): boolean {
-  return [
-    "toggle",
-    "to_do",
-    "bulleted_list_item",
-    "numbered_list_item",
-    "callout",
-    "quote",
-    "synced_block",
-  ].includes(type);
 }
 
 async function clearChildren(notion: Client, blockId: string): Promise<void> {

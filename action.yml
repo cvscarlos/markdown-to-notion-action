@@ -11,7 +11,7 @@ inputs:
     required: true
 
   index_block_id:
-    description: "Notion block ID or block URL for the index list container"
+    description: "Notion block ID/URL used only to locate the parent page (the block itself is not modified)"
     required: false
 
   parent_page_id:

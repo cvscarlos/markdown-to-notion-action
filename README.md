@@ -23,8 +23,8 @@ This action:
 
 3. **Decide where pages will be created**
 
-- **Option A (with index block):** Use a block on the index page and provide `index_block_id`.
-- **Option B (without index block):** Provide `parent_page_id` only.
+- **Option A:** Provide `index_block_id` to locate the parent page (the block itself is not modified).
+- **Option B:** Provide `parent_page_id` directly.
 
 4. **Add a GitHub workflow**
 
@@ -108,7 +108,7 @@ jobs:
 | ------------------------ | -------- | ----------------------------------------------------------------------------------------------------------------- |
 | `notion_token`           | Yes      | Notion Integration Secret.                                                                                        |
 | `docs_folder`            | Yes      | Folder containing Markdown files (relative to the repository root).                                               |
-| `index_block_id`         | No       | Block ID/URL for the index list container. If provided, the index block is cleared and rebuilt every run.         |
+| `index_block_id`         | No       | Block ID/URL used only to locate the parent page (the block itself is not modified).                              |
 | `parent_page_id`         | No       | Parent page ID/URL for new pages (used when `index_block_id` is not provided).                                    |
 | `title_prefix_separator` | No       | Separator used between folder names and the title. Default: `→`.                                                  |
 | `commit_strategy`        | No       | How to persist `notion_page_id` updates: `pr` (default), `push`, or `none`.                                       |
@@ -155,12 +155,9 @@ Supported conversions include:
 - Text is split into chunks ≤ 2000 characters.
 - Links are validated. Invalid or relative links are dropped (text is preserved).
 
-### 4) Index Block Update (Optional)
+### 4) Index Block (Optional)
 
-If `index_block_id` is provided, the action:
-
-- Clears the current children of that block.
-- Appends a fresh bulleted list of links to all synced documents.
+If `index_block_id` is provided, the action only uses it to find the parent page. The block itself is never modified.
 
 ### 5) Git Write-Back
 
@@ -213,7 +210,7 @@ This action validates links and drops invalid/relative URLs instead of crashing.
 
 ### "Either index_block_id or parent_page_id must be provided"
 
-Set one of the two inputs. `index_block_id` is only needed if you want the index updated.
+Set one of the two inputs. `index_block_id` is only needed if you want to derive the parent page from a block link.
 
 ### "Missing permissions" on push
 
