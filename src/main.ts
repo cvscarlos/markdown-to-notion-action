@@ -38,7 +38,6 @@ type SyncResult = {
   filePath: string;
 };
 
-type FolderStrategy = "subpages" | "title_prefix";
 type CommitStrategy = "push" | "pr" | "none";
 
 async function run(): Promise<void> {
@@ -47,7 +46,6 @@ async function run(): Promise<void> {
     const docsFolder = readInput("docs_folder", ["DOCS_FOLDER"]);
     const indexBlockInput = readInput("index_block_id", ["INDEX_BLOCK_ID"]);
     const parentPageInput = readInput("parent_page_id", ["PARENT_PAGE_ID"]);
-    const folderStrategyInput = readInput("folder_strategy", ["FOLDER_STRATEGY"]);
     const titlePrefixSeparatorInput = readInput("title_prefix_separator", [
       "TITLE_PREFIX_SEPARATOR",
     ]);
@@ -82,7 +80,6 @@ async function run(): Promise<void> {
     const parentPageId = indexBlockId
       ? await resolveParentPageId(notion, indexBlockId)
       : normalizeNotionId(parentPageInput);
-    const folderStrategy = normalizeFolderStrategy(folderStrategyInput);
     const titlePrefixSeparator = normalizeTitlePrefixSeparator(titlePrefixSeparatorInput);
 
     const markdownFiles = await collectMarkdownFiles(docsFolderPath);
@@ -114,7 +111,7 @@ async function run(): Promise<void> {
           logger: (message) => core.info(`[${doc.relPath}] ${message}`),
         });
 
-        const effectiveTitle = buildTitleWithStrategy(doc, folderStrategy, titlePrefixSeparator);
+        const effectiveTitle = buildTitleWithSeparator(doc, titlePrefixSeparator);
         let pageId = doc.notionPageId;
         let pageUrl = doc.notionUrl;
         if (pageId) {
@@ -132,10 +129,7 @@ async function run(): Promise<void> {
         }
 
         if (!pageId) {
-          const pageParentId =
-            folderStrategy === "subpages"
-              ? await resolveFolderParentPage(notion, parentPageId, doc.relPath, folderPageCache)
-              : parentPageId;
+          const pageParentId = parentPageId;
           const created = await createPage(notion, pageParentId, effectiveTitle);
           pageId = normalizeNotionId(created.id);
           pageUrl = created.url || notionPageUrl(pageId);
@@ -219,18 +213,6 @@ function isNotionNotFoundError(error: unknown): boolean {
     return true;
   }
   return false;
-}
-
-function normalizeFolderStrategy(value: string): FolderStrategy {
-  const normalized = value.trim().toLowerCase();
-  if (!normalized) {
-    return "subpages";
-  }
-  if (normalized === "subpages" || normalized === "title_prefix") {
-    return normalized;
-  }
-  core.warning(`Unknown folder_strategy '${value}', defaulting to 'subpages'.`);
-  return "subpages";
 }
 
 function normalizeTitlePrefixSeparator(value: string): string {
@@ -503,15 +485,8 @@ function buildTitleProperty(title: string): PageProperties {
   } as PageProperties;
 }
 
-function buildTitleWithStrategy(
-  doc: DocEntry,
-  strategy: FolderStrategy,
-  separator: string,
-): string {
+function buildTitleWithSeparator(doc: DocEntry, separator: string): string {
   const baseTitle = doc.title || "Untitled";
-  if (strategy !== "title_prefix") {
-    return baseTitle;
-  }
   const folderPath = normalizeFolderPath(doc.relPath);
   if (!folderPath) {
     return baseTitle;

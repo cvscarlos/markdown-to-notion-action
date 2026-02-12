@@ -58,9 +58,7 @@ jobs:
           notion_token: ${{ secrets.NOTION_TOKEN }}
           docs_folder: docs
           index_block_id: ${{ secrets.NOTION_INDEX_BLOCK_ID }}
-          # Optional: subpages (default) or title_prefix
-          folder_strategy: subpages
-          # Optional: separator used when folder_strategy=title_prefix (default: →)
+          # Optional: separator used between folder names and title (default: →)
           title_prefix_separator: "→"
           # Optional: pr (default), push, or none
           commit_strategy: pr
@@ -97,9 +95,7 @@ jobs:
           notion_token: ${{ secrets.NOTION_TOKEN }}
           docs_folder: docs
           parent_page_id: ${{ secrets.NOTION_PARENT_PAGE_ID }}
-          # Optional: subpages (default) or title_prefix
-          folder_strategy: subpages
-          # Optional: separator used when folder_strategy=title_prefix (default: →)
+          # Optional: separator used between folder names and title (default: →)
           title_prefix_separator: "→"
           # Optional: pr (default), push, or none
           commit_strategy: pr
@@ -108,16 +104,15 @@ jobs:
 
 ## Inputs
 
-| Input             | Required | Description                                                                                                                  |
-| ----------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `notion_token`    | Yes      | Notion Integration Secret.                                                                                                   |
-| `docs_folder`     | Yes      | Folder containing Markdown files (relative to the repository root).                                                          |
-| `index_block_id`  | No       | Block ID/URL for the index list container. If provided, the index block is cleared and rebuilt every run.                    |
-| `parent_page_id`  | No       | Parent page ID/URL for new pages (used when `index_block_id` is not provided).                                               |
-| `folder_strategy` | No       | How to represent subfolders: `subpages` (default) creates nested pages; `title_prefix` prefixes titles with the folder path. |
-| `title_prefix_separator` | No | Separator for folder paths when using `title_prefix`. Default: `→`.                                                         |
-| `commit_strategy` | No       | How to persist `notion_page_id` updates: `pr` (default), `push`, or `none`.                                                  |
-| `github_token`    | No       | Required when `commit_strategy` is `push` or `pr`. Used to push commits or open PRs for `notion_page_id` updates.            |
+| Input                    | Required | Description                                                                                                       |
+| ------------------------ | -------- | ----------------------------------------------------------------------------------------------------------------- |
+| `notion_token`           | Yes      | Notion Integration Secret.                                                                                        |
+| `docs_folder`            | Yes      | Folder containing Markdown files (relative to the repository root).                                               |
+| `index_block_id`         | No       | Block ID/URL for the index list container. If provided, the index block is cleared and rebuilt every run.         |
+| `parent_page_id`         | No       | Parent page ID/URL for new pages (used when `index_block_id` is not provided).                                    |
+| `title_prefix_separator` | No       | Separator used between folder names and the title. Default: `→`.                                                  |
+| `commit_strategy`        | No       | How to persist `notion_page_id` updates: `pr` (default), `push`, or `none`.                                       |
+| `github_token`           | No       | Required when `commit_strategy` is `push` or `pr`. Used to push commits or open PRs for `notion_page_id` updates. |
 
 **Requirement:** You must provide either `index_block_id` **or** `parent_page_id`.
 
@@ -151,10 +146,9 @@ Supported conversions include:
 - Tables
 - `Table of Contents` / `[TOC]` placeholders → Notion `table_of_contents` block
 
-**Folder strategy:**
+**Folder titles:**
 
-- `subpages` (default): `docs/shopify/overview.md` becomes a page under a `shopify` subpage.
-- `title_prefix`: `docs/shopify/overview.md` becomes a page titled `shopify → Overview` (separator configurable).
+- `docs/shopify/overview.md` becomes a page titled `shopify → Overview` (separator configurable).
 
 **Safety rules:**
 
