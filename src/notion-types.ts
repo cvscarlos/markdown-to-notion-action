@@ -119,6 +119,10 @@ export type NotionRichText = {
   href?: string | null;
 };
 
+export type NotionBlockBase = {
+  object?: "block";
+};
+
 export type ParagraphBlock = {
   type: "paragraph";
   paragraph: {
@@ -126,7 +130,7 @@ export type ParagraphBlock = {
     color?: NotionColor;
     children?: NotionBlock[];
   };
-};
+} & NotionBlockBase;
 
 export type HeadingBlock = {
   type: "heading_1" | "heading_2" | "heading_3";
@@ -148,7 +152,7 @@ export type HeadingBlock = {
     is_toggleable?: boolean;
     children?: NotionBlock[];
   };
-};
+} & NotionBlockBase;
 
 export type BulletedListItemBlock = {
   type: "bulleted_list_item";
@@ -157,7 +161,7 @@ export type BulletedListItemBlock = {
     color?: NotionColor;
     children?: NotionBlock[];
   };
-};
+} & NotionBlockBase;
 
 export type NumberedListItemBlock = {
   type: "numbered_list_item";
@@ -166,7 +170,7 @@ export type NumberedListItemBlock = {
     color?: NotionColor;
     children?: NotionBlock[];
   };
-};
+} & NotionBlockBase;
 
 export type QuoteBlock = {
   type: "quote";
@@ -175,7 +179,7 @@ export type QuoteBlock = {
     color?: NotionColor;
     children?: NotionBlock[];
   };
-};
+} & NotionBlockBase;
 
 export type CalloutBlock = {
   type: "callout";
@@ -191,7 +195,7 @@ export type CalloutBlock = {
         };
     children?: NotionBlock[];
   };
-};
+} & NotionBlockBase;
 
 export type ToggleBlock = {
   type: "toggle";
@@ -200,7 +204,7 @@ export type ToggleBlock = {
     color?: NotionColor;
     children?: NotionBlock[];
   };
-};
+} & NotionBlockBase;
 
 export type ToDoBlock = {
   type: "to_do";
@@ -210,12 +214,12 @@ export type ToDoBlock = {
     color?: NotionColor;
     children?: NotionBlock[];
   };
-};
+} & NotionBlockBase;
 
 export type DividerBlock = {
   type: "divider";
   divider: Record<string, never>;
-};
+} & NotionBlockBase;
 
 export type CodeBlock = {
   type: "code";
@@ -224,14 +228,31 @@ export type CodeBlock = {
     language: NotionCodeLanguage;
     caption?: NotionRichText[];
   };
-};
+} & NotionBlockBase;
+
+export type EquationBlock = {
+  type: "equation";
+  equation: {
+    expression: string;
+  };
+} & NotionBlockBase;
+
+export type ImageBlock = {
+  type: "image";
+  image: {
+    type: "external" | "file";
+    external?: { url: string };
+    file?: { url: string; expiry_time?: string };
+    caption?: NotionRichText[];
+  };
+} & NotionBlockBase;
 
 export type TableRowBlock = {
   type: "table_row";
   table_row: {
     cells: NotionRichText[][];
   };
-};
+} & NotionBlockBase;
 
 export type TableBlock = {
   type: "table";
@@ -241,14 +262,14 @@ export type TableBlock = {
     has_row_header: boolean;
     children: TableRowBlock[];
   };
-};
+} & NotionBlockBase;
 
 export type TableOfContentsBlock = {
   type: "table_of_contents";
   table_of_contents: {
     color?: NotionColor;
   };
-};
+} & NotionBlockBase;
 
 export type NotionBlock =
   | ParagraphBlock
@@ -261,6 +282,8 @@ export type NotionBlock =
   | ToDoBlock
   | DividerBlock
   | CodeBlock
+  | EquationBlock
+  | ImageBlock
   | TableBlock
   | TableRowBlock
   | TableOfContentsBlock;

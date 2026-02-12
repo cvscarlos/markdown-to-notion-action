@@ -1,12 +1,6 @@
 import MarkdownIt from "markdown-it";
-import type { Token } from "markdown-it";
-import {
-  NOTION_CODE_LANGUAGES,
-  type NotionBlock,
-  type NotionCodeLanguage,
-  type NotionColor,
-  type NotionRichText,
-} from "./notion-types";
+import { markdownToBlocks } from "@tryfabric/martian";
+import type { NotionBlock, NotionRichText } from "./notion-types";
 
 export type Logger = (message: string) => void;
 
@@ -15,16 +9,10 @@ export type MarkdownToNotionOptions = {
   logger?: Logger;
 };
 
-export type RichTextItemRequest = NotionRichText;
-
 const md = new MarkdownIt({
   html: false,
   linkify: true,
 });
-
-const MAX_TEXT_LENGTH = 2000;
-
-const ALLOWED_CODE_LANGUAGES = new Set(NOTION_CODE_LANGUAGES);
 
 const TABLE_OF_CONTENTS_LABELS = new Set([
   "table of contents",
@@ -50,487 +38,94 @@ export function extractTitle(markdown: string): string | null {
   return null;
 }
 
-type ParseState = {
-  index: number;
-  skipNextList?: boolean;
-};
-
 export function markdownToNotionBlocks(
   markdown: string,
   options: MarkdownToNotionOptions = {},
 ): NotionBlock[] {
-  const tokens = md.parse(markdown, {});
-  const state: ParseState = { index: 0 };
-  return parseTokens(tokens, state, options);
+  const rawBlocks = markdownToBlocks(markdown) as unknown as NotionBlock[];
+  const sanitized = sanitizeBlocks(rawBlocks, options);
+  return applyTableOfContents(sanitized);
 }
 
-function parseTokens(
-  tokens: Token[],
-  state: ParseState,
-  options: MarkdownToNotionOptions,
-  stopOnTypes: string[] = [],
-): NotionBlock[] {
-  const blocks: NotionBlock[] = [];
-
-  while (state.index < tokens.length) {
-    const token = tokens[state.index];
-    if (stopOnTypes.includes(token.type)) {
-      break;
-    }
-
-    if (
-      state.skipNextList &&
-      token.type !== "bullet_list_open" &&
-      token.type !== "ordered_list_open"
-    ) {
-      state.skipNextList = false;
-    }
-
-    switch (token.type) {
-      case "heading_open": {
-        const level = parseHeadingLevel(token.tag);
-        const inline = tokens[state.index + 1];
-        const richText =
-          inline && inline.type === "inline" ? inlineToRichText(inline, options) : [];
-        blocks.push(...createHeadingBlocks(level, richText));
-        state.index += 3;
-        if (inline && inline.type === "inline" && isTableOfContentsLabel(inline.content)) {
-          blocks.push(createTableOfContentsBlock());
-          state.skipNextList = true;
-        }
-        break;
-      }
-      case "paragraph_open": {
-        const inline = tokens[state.index + 1];
-        if (inline && inline.type === "inline" && isTableOfContentsLabel(inline.content)) {
-          blocks.push(createTableOfContentsBlock());
-          state.index += 3;
-          state.skipNextList = true;
-          break;
-        }
-        const richText =
-          inline && inline.type === "inline" ? inlineToRichText(inline, options) : [];
-        blocks.push(...createParagraphBlocks(richText));
-        state.index += 3;
-        break;
-      }
-      case "bullet_list_open": {
-        state.index += 1;
-        if (state.skipNextList) {
-          parseList(tokens, state, "bulleted", options);
-          state.skipNextList = false;
-          break;
-        }
-        blocks.push(...parseList(tokens, state, "bulleted", options));
-        break;
-      }
-      case "ordered_list_open": {
-        state.index += 1;
-        if (state.skipNextList) {
-          parseList(tokens, state, "numbered", options);
-          state.skipNextList = false;
-          break;
-        }
-        blocks.push(...parseList(tokens, state, "numbered", options));
-        break;
-      }
-      case "table_open": {
-        state.index += 1;
-        blocks.push(...parseTable(tokens, state, options));
-        break;
-      }
-      case "fence": {
-        const language = normalizeCodeLanguage(token.info || "");
-        const content = token.content || "";
-        blocks.push(...createCodeBlocks(content, language));
-        state.index += 1;
-        break;
-      }
-      case "blockquote_open": {
-        state.index += 1;
-        const quoteBlocks = parseTokens(tokens, state, options, ["blockquote_close"]);
-        state.index += 1;
-        blocks.push(...quoteBlocks.map((block) => wrapQuote(block)));
-        break;
-      }
-      case "hr": {
-        blocks.push({ type: "divider", divider: {} });
-        state.index += 1;
-        break;
-      }
-      case "inline": {
-        const richText = inlineToRichText(token, options);
-        blocks.push(...createParagraphBlocks(richText));
-        state.index += 1;
-        break;
-      }
-      default: {
-        if (token.type.endsWith("_open")) {
-          options.logger?.(`Skipping unsupported markdown token: ${token.type}`);
-        }
-        state.index += 1;
-        break;
-      }
+function sanitizeBlocks(blocks: NotionBlock[], options: MarkdownToNotionOptions): NotionBlock[] {
+  const sanitized: NotionBlock[] = [];
+  for (const block of blocks) {
+    const normalized = sanitizeBlock(block, options);
+    if (normalized) {
+      sanitized.push(normalized);
     }
   }
-
-  return blocks;
+  return sanitized;
 }
 
-function parseList(
-  tokens: Token[],
-  state: ParseState,
-  listType: "bulleted" | "numbered",
-  options: MarkdownToNotionOptions,
-): NotionBlock[] {
-  const blocks: NotionBlock[] = [];
-  const closeType = listType === "bulleted" ? "bullet_list_close" : "ordered_list_close";
-
-  while (state.index < tokens.length) {
-    const token = tokens[state.index];
-    if (token.type === closeType) {
-      state.index += 1;
-      break;
-    }
-    if (token.type === "list_item_open") {
-      state.index += 1;
-      const { richText, children } = parseListItem(tokens, state, options);
-      const block: NotionBlock =
-        listType === "bulleted"
-          ? {
-              type: "bulleted_list_item",
-              bulleted_list_item: {
-                rich_text: richText,
-                color: "default",
-                children: children.length > 0 ? children : undefined,
-              },
-            }
-          : {
-              type: "numbered_list_item",
-              numbered_list_item: {
-                rich_text: richText,
-                color: "default",
-                children: children.length > 0 ? children : undefined,
-              },
-            };
-      blocks.push(block);
-      continue;
-    }
-
-    state.index += 1;
+function sanitizeBlock(block: NotionBlock, options: MarkdownToNotionOptions): NotionBlock | null {
+  if (!block || typeof block !== "object") {
+    return null;
+  }
+  const type = (block as { type?: string }).type;
+  if (!type || typeof type !== "string") {
+    return null;
   }
 
-  return blocks;
+  const content = (block as Record<string, unknown>)[type];
+  if (content && typeof content === "object") {
+    const contentRecord = content as Record<string, unknown>;
+    if (Array.isArray(contentRecord.rich_text)) {
+      contentRecord.rich_text = sanitizeRichText(
+        contentRecord.rich_text as NotionRichText[],
+        options,
+      );
+    }
+    if (Array.isArray(contentRecord.caption)) {
+      contentRecord.caption = sanitizeRichText(contentRecord.caption as NotionRichText[], options);
+    }
+    if (type === "table_row" && Array.isArray(contentRecord.cells)) {
+      contentRecord.cells = (contentRecord.cells as NotionRichText[][]).map((cell) =>
+        sanitizeRichText(cell, options),
+      );
+    }
+    if (Array.isArray(contentRecord.children)) {
+      contentRecord.children = sanitizeBlocks(contentRecord.children as NotionBlock[], options);
+    }
+  }
+
+  return block;
 }
 
-function parseTable(
-  tokens: Token[],
-  state: ParseState,
+function sanitizeRichText(
+  richText: NotionRichText[],
   options: MarkdownToNotionOptions,
-): NotionBlock[] {
-  const rows: RichTextItemRequest[][][] = [];
-  let inHead = false;
-  let hasColumnHeader = false;
-
-  while (state.index < tokens.length) {
-    const token = tokens[state.index];
-    if (token.type === "table_close") {
-      state.index += 1;
-      break;
+): NotionRichText[] {
+  return richText.map((item) => {
+    if (item.type !== "text") {
+      return item;
     }
 
-    switch (token.type) {
-      case "thead_open":
-        inHead = true;
-        state.index += 1;
-        break;
-      case "thead_close":
-        inHead = false;
-        state.index += 1;
-        break;
-      case "tbody_open":
-      case "tbody_close":
-        state.index += 1;
-        break;
-      case "tr_open": {
-        state.index += 1;
-        const row = parseTableRow(tokens, state, options);
-        if (row.length > 0) {
-          rows.push(row);
-          if (inHead) {
-            hasColumnHeader = true;
-          }
-        }
-        break;
+    const link = item.text.link;
+    if (link?.url) {
+      const normalized = normalizeLink(link.url, options);
+      if (!normalized) {
+        return {
+          ...item,
+          text: {
+            ...item.text,
+            link: null,
+          },
+        };
       }
-      default:
-        state.index += 1;
-        break;
+      if (normalized !== link.url) {
+        return {
+          ...item,
+          text: {
+            ...item.text,
+            link: { url: normalized },
+          },
+        };
+      }
     }
-  }
 
-  if (rows.length === 0) {
-    return [];
-  }
-
-  const tableWidth = Math.max(...rows.map((row) => row.length));
-  if (tableWidth === 0) {
-    return [];
-  }
-
-  const normalizedRows = rows.map((row) => {
-    const padded = [...row];
-    while (padded.length < tableWidth) {
-      padded.push([]);
-    }
-    return padded;
+    return item;
   });
-
-  const tableRows = normalizedRows.map((row) => ({
-    type: "table_row" as const,
-    table_row: {
-      cells: row.map((cell) => normalizeRichTextForCell(cell)),
-    },
-  }));
-
-  return [
-    {
-      type: "table",
-      table: {
-        table_width: tableWidth,
-        has_column_header: hasColumnHeader,
-        has_row_header: false,
-        children: tableRows,
-      },
-    },
-  ];
-}
-
-function parseTableRow(
-  tokens: Token[],
-  state: ParseState,
-  options: MarkdownToNotionOptions,
-): RichTextItemRequest[][] {
-  const cells: RichTextItemRequest[][] = [];
-
-  while (state.index < tokens.length) {
-    const token = tokens[state.index];
-    if (token.type === "tr_close") {
-      state.index += 1;
-      break;
-    }
-
-    if (token.type === "th_open" || token.type === "td_open") {
-      state.index += 1;
-      const cell = parseTableCell(tokens, state, options, token.type === "th_open");
-      cells.push(cell);
-      continue;
-    }
-
-    state.index += 1;
-  }
-
-  return cells;
-}
-
-function parseTableCell(
-  tokens: Token[],
-  state: ParseState,
-  options: MarkdownToNotionOptions,
-  isHeader: boolean,
-): RichTextItemRequest[] {
-  const richText: RichTextItemRequest[] = [];
-  const closeType = isHeader ? "th_close" : "td_close";
-
-  while (state.index < tokens.length) {
-    const token = tokens[state.index];
-    if (token.type === closeType) {
-      state.index += 1;
-      break;
-    }
-
-    if (token.type === "inline") {
-      richText.push(...inlineToRichText(token, options));
-      state.index += 1;
-      continue;
-    }
-
-    if (token.type === "paragraph_open") {
-      const inline = tokens[state.index + 1];
-      if (inline && inline.type === "inline") {
-        richText.push(...inlineToRichText(inline, options));
-      }
-      state.index += 3;
-      continue;
-    }
-
-    state.index += 1;
-  }
-
-  return normalizeRichTextForCell(richText);
-}
-
-function parseListItem(
-  tokens: Token[],
-  state: ParseState,
-  options: MarkdownToNotionOptions,
-): { richText: RichTextItemRequest[]; children: NotionBlock[] } {
-  let richText: RichTextItemRequest[] = [];
-  const children: NotionBlock[] = [];
-
-  while (state.index < tokens.length) {
-    const token = tokens[state.index];
-    if (token.type === "list_item_close") {
-      state.index += 1;
-      break;
-    }
-
-    switch (token.type) {
-      case "paragraph_open": {
-        const inline = tokens[state.index + 1];
-        const inlineRichText =
-          inline && inline.type === "inline" ? inlineToRichText(inline, options) : [];
-        if (richText.length === 0) {
-          richText = inlineRichText;
-        } else {
-          children.push(...createParagraphBlocks(inlineRichText));
-        }
-        state.index += 3;
-        break;
-      }
-      case "bullet_list_open": {
-        state.index += 1;
-        children.push(...parseList(tokens, state, "bulleted", options));
-        break;
-      }
-      case "ordered_list_open": {
-        state.index += 1;
-        children.push(...parseList(tokens, state, "numbered", options));
-        break;
-      }
-      case "table_open": {
-        state.index += 1;
-        children.push(...parseTable(tokens, state, options));
-        break;
-      }
-      case "fence": {
-        const language = normalizeCodeLanguage(token.info || "");
-        const content = token.content || "";
-        children.push(...createCodeBlocks(content, language));
-        state.index += 1;
-        break;
-      }
-      default: {
-        state.index += 1;
-        break;
-      }
-    }
-  }
-
-  return {
-    richText,
-    children,
-  };
-}
-
-function inlineToRichText(inline: Token, options: MarkdownToNotionOptions): RichTextItemRequest[] {
-  if (!inline.children || inline.children.length === 0) {
-    const content = inline.content || "";
-    return content.length > 0 ? [createText(content)] : [];
-  }
-
-  const richText: RichTextItemRequest[] = [];
-  const current: {
-    bold: boolean;
-    italic: boolean;
-    code: boolean;
-    strikethrough: boolean;
-    underline: boolean;
-    color: NotionColor;
-  } = {
-    bold: false,
-    italic: false,
-    code: false,
-    strikethrough: false,
-    underline: false,
-    color: "default",
-  };
-  let currentLink: string | null = null;
-
-  const pushText = (text: string, override?: Partial<typeof current>) => {
-    if (text.length === 0) {
-      return;
-    }
-    richText.push({
-      type: "text",
-      text: {
-        content: text,
-        link: currentLink ? { url: currentLink } : null,
-      },
-      annotations: {
-        bold: override?.bold ?? current.bold,
-        italic: override?.italic ?? current.italic,
-        code: override?.code ?? current.code,
-        strikethrough: override?.strikethrough ?? current.strikethrough,
-        underline: override?.underline ?? current.underline,
-        color: current.color,
-      },
-    });
-  };
-
-  for (const child of inline.children) {
-    switch (child.type) {
-      case "text":
-        pushText(child.content || "");
-        break;
-      case "softbreak":
-      case "hardbreak":
-        pushText("\n");
-        break;
-      case "code_inline":
-        pushText(child.content || "", { code: true });
-        break;
-      case "strong_open":
-        current.bold = true;
-        break;
-      case "strong_close":
-        current.bold = false;
-        break;
-      case "em_open":
-        current.italic = true;
-        break;
-      case "em_close":
-        current.italic = false;
-        break;
-      case "s_open":
-      case "del_open":
-        current.strikethrough = true;
-        break;
-      case "s_close":
-      case "del_close":
-        current.strikethrough = false;
-        break;
-      case "link_open": {
-        const href = child.attrGet("href");
-        currentLink = href ? normalizeLink(href, options) : null;
-        break;
-      }
-      case "link_close":
-        currentLink = null;
-        break;
-      case "image": {
-        const alt = child.content || child.attrGet("alt") || "";
-        if (alt.length > 0) {
-          pushText(alt);
-        }
-        break;
-      }
-      default:
-        break;
-    }
-  }
-
-  return richText;
 }
 
 function normalizeLink(href: string, options: MarkdownToNotionOptions): string | null {
@@ -562,79 +157,57 @@ function isRelativeLink(href: string): boolean {
   return !/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(href);
 }
 
-function createText(content: string): RichTextItemRequest {
-  return {
-    type: "text",
-    text: {
-      content,
-      link: null,
-    },
-  };
-}
+function applyTableOfContents(blocks: NotionBlock[]): NotionBlock[] {
+  const result: NotionBlock[] = [];
+  let skipNextList = false;
 
-function createParagraphBlocks(richText: RichTextItemRequest[]): NotionBlock[] {
-  return splitRichTextByLength(richText).map(
-    (chunk) =>
-      ({
-        type: "paragraph",
-        paragraph: {
-          rich_text: chunk,
-          color: "default",
-        },
-      }) as NotionBlock,
-  );
-}
+  for (const block of blocks) {
+    if (
+      skipNextList &&
+      block.type !== "bulleted_list_item" &&
+      block.type !== "numbered_list_item"
+    ) {
+      skipNextList = false;
+    }
 
-function createHeadingBlocks(level: 1 | 2 | 3, richText: RichTextItemRequest[]): NotionBlock[] {
-  const chunks = splitRichTextByLength(richText);
-  return chunks.map((chunk) => {
-    const headingType = level === 1 ? "heading_1" : level === 2 ? "heading_2" : "heading_3";
-    return {
-      type: headingType,
-      [headingType]: {
-        rich_text: chunk,
-        color: "default",
-      },
-    } as NotionBlock;
-  });
-}
+    const label = extractBlockText(block);
+    if (label && isTableOfContentsLabel(label)) {
+      result.push(createTableOfContentsBlock());
+      skipNextList = true;
+      continue;
+    }
 
-function createCodeBlocks(content: string, language: NotionCodeLanguage): NotionBlock[] {
-  const chunks = splitTextByLength(content);
-  return chunks.map(
-    (chunk) =>
-      ({
-        type: "code",
-        code: {
-          rich_text: [createText(chunk)],
-          language,
-        },
-      }) as NotionBlock,
-  );
-}
+    if (skipNextList) {
+      if (block.type === "bulleted_list_item" || block.type === "numbered_list_item") {
+        continue;
+      }
+      skipNextList = false;
+    }
 
-function wrapQuote(block: NotionBlock): NotionBlock {
-  if (block.type === "paragraph") {
-    return {
-      type: "quote",
-      quote: {
-        rich_text: block.paragraph.rich_text,
-        color: "default",
-      },
-    };
+    result.push(block);
   }
 
-  return block;
+  return result;
 }
 
-function parseHeadingLevel(tag: string): 1 | 2 | 3 {
-  if (tag === "h1") {
-    return 1;
+function extractBlockText(block: NotionBlock): string {
+  if (block.type === "paragraph" && block.paragraph?.rich_text) {
+    return concatRichText(block.paragraph.rich_text);
   }
-  if (tag === "h2") {
-    return 2;
+  if (block.type === "heading_1" && block.heading_1?.rich_text) {
+    return concatRichText(block.heading_1.rich_text);
   }
-  return 3;
+  if (block.type === "heading_2" && block.heading_2?.rich_text) {
+    return concatRichText(block.heading_2.rich_text);
+  }
+  if (block.type === "heading_3" && block.heading_3?.rich_text) {
+    return concatRichText(block.heading_3.rich_text);
+  }
+  return "";
+}
+
+function concatRichText(richText: NotionRichText[]): string {
+  return richText.map((item) => item.text?.content ?? "").join("");
 }
 
 function isTableOfContentsLabel(text: string): boolean {
@@ -656,134 +229,4 @@ function createTableOfContentsBlock(): NotionBlock {
       color: "default",
     },
   };
-}
-
-function normalizeCodeLanguage(info: string): NotionCodeLanguage {
-  const raw = info.trim().toLowerCase();
-  if (raw.length === 0) {
-    return "plain text";
-  }
-  if (raw === "text" || raw === "plaintext") {
-    return "plain text";
-  }
-  if (raw === "js") {
-    return "javascript";
-  }
-  if (raw === "ts") {
-    return "typescript";
-  }
-  if (raw === "sh" || raw === "shell" || raw === "zsh") {
-    return "bash";
-  }
-  if (isNotionCodeLanguage(raw)) {
-    return raw;
-  }
-  return "plain text";
-}
-
-function isNotionCodeLanguage(value: string): value is NotionCodeLanguage {
-  return ALLOWED_CODE_LANGUAGES.has(value as NotionCodeLanguage);
-}
-
-function splitRichTextByLength(richText: RichTextItemRequest[]): RichTextItemRequest[][] {
-  const chunks: RichTextItemRequest[][] = [];
-  let currentChunk: RichTextItemRequest[] = [];
-  let currentLength = 0;
-
-  for (const item of richText) {
-    if (item.type !== "text") {
-      continue;
-    }
-
-    const text = item.text.content || "";
-    if (text.length === 0) {
-      continue;
-    }
-
-    let remaining = text;
-    while (remaining.length > 0) {
-      const available = MAX_TEXT_LENGTH - currentLength;
-      if (available === 0) {
-        if (currentChunk.length > 0) {
-          chunks.push(currentChunk);
-        }
-        currentChunk = [];
-        currentLength = 0;
-        continue;
-      }
-
-      const slice = remaining.slice(0, available);
-      currentChunk.push({
-        ...item,
-        text: {
-          ...item.text,
-          content: slice,
-        },
-      });
-      currentLength += slice.length;
-      remaining = remaining.slice(slice.length);
-
-      if (currentLength >= MAX_TEXT_LENGTH) {
-        chunks.push(currentChunk);
-        currentChunk = [];
-        currentLength = 0;
-      }
-    }
-  }
-
-  if (currentChunk.length > 0) {
-    chunks.push(currentChunk);
-  }
-
-  if (chunks.length === 0) {
-    return [[]];
-  }
-
-  return chunks;
-}
-
-function normalizeRichTextForCell(richText: RichTextItemRequest[]): RichTextItemRequest[] {
-  const normalized: RichTextItemRequest[] = [];
-
-  for (const item of richText) {
-    if (item.type !== "text") {
-      normalized.push(item);
-      continue;
-    }
-
-    const content = item.text.content || "";
-    if (content.length === 0) {
-      normalized.push(item);
-      continue;
-    }
-
-    let remaining = content;
-    while (remaining.length > 0) {
-      const slice = remaining.slice(0, MAX_TEXT_LENGTH);
-      normalized.push({
-        ...item,
-        text: {
-          ...item.text,
-          content: slice,
-        },
-      });
-      remaining = remaining.slice(slice.length);
-    }
-  }
-
-  return normalized;
-}
-
-function splitTextByLength(text: string): string[] {
-  if (text.length <= MAX_TEXT_LENGTH) {
-    return [text];
-  }
-
-  const chunks: string[] = [];
-  let remaining = text;
-  while (remaining.length > 0) {
-    chunks.push(remaining.slice(0, MAX_TEXT_LENGTH));
-    remaining = remaining.slice(MAX_TEXT_LENGTH);
-  }
-  return chunks;
 }

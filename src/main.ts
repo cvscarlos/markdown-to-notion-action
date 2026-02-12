@@ -1,8 +1,8 @@
 import * as core from "@actions/core";
+import * as github from "@actions/github";
 import { Client } from "@notionhq/client";
 import type {
   BlockObjectRequest,
-  BlockObjectResponse,
   PartialBlockObjectResponse,
 } from "@notionhq/client/build/src/api-endpoints";
 import fm from "front-matter";
@@ -10,8 +10,8 @@ import dotenv from "dotenv";
 import * as fs from "fs/promises";
 import * as path from "path";
 import { markdownToNotionBlocks, extractTitle } from "./markdown-to-notion";
-import type { NotionBlock, NotionRichText } from "./notion-types";
-import { commitAndPush } from "./git-utils";
+import type { NotionBlock } from "./notion-types";
+import { commitAndPush, commitAndPushToBranch, getCurrentBranch, getShortSha } from "./git-utils";
 
 dotenv.config();
 
@@ -34,6 +34,7 @@ type SyncResult = {
 };
 
 type FolderStrategy = "subpages" | "title_prefix";
+type CommitStrategy = "push" | "pr" | "none";
 
 async function run(): Promise<void> {
   try {
@@ -42,11 +43,16 @@ async function run(): Promise<void> {
     const indexBlockInput = readInput("index_block_id", ["INDEX_BLOCK_ID"]);
     const parentPageInput = readInput("parent_page_id", ["PARENT_PAGE_ID"]);
     const folderStrategyInput = readInput("folder_strategy", ["FOLDER_STRATEGY"]);
-    const pushFailureModeInput = readInput("push_failure_mode", ["PUSH_FAILURE_MODE"]);
+    const commitStrategyInput = readInput("commit_strategy", ["COMMIT_STRATEGY"]);
     const githubToken = readInput("github_token", ["GITHUB_TOKEN"]);
+    const commitStrategy = normalizeCommitStrategy(commitStrategyInput);
 
-    if (!notionToken || !docsFolder || !githubToken) {
-      throw new Error("Missing required inputs. Check notion_token, docs_folder, github_token.");
+    if (!notionToken || !docsFolder) {
+      throw new Error("Missing required inputs. Check notion_token and docs_folder.");
+    }
+
+    if (commitStrategy !== "none" && !githubToken) {
+      throw new Error("github_token is required when commit_strategy is 'push' or 'pr'.");
     }
 
     if (!indexBlockInput && !parentPageInput) {
@@ -54,7 +60,9 @@ async function run(): Promise<void> {
     }
 
     core.setSecret(notionToken);
-    core.setSecret(githubToken);
+    if (githubToken) {
+      core.setSecret(githubToken);
+    }
 
     const notion = new Client({ auth: notionToken });
 
@@ -67,7 +75,6 @@ async function run(): Promise<void> {
       ? await resolveParentPageId(notion, indexBlockId)
       : normalizeNotionId(parentPageInput);
     const folderStrategy = normalizeFolderStrategy(folderStrategyInput);
-    const failOnPushError = normalizePushFailureMode(pushFailureModeInput);
 
     const markdownFiles = await collectMarkdownFiles(docsFolderPath);
     if (markdownFiles.length === 0) {
@@ -110,9 +117,7 @@ async function run(): Promise<void> {
             if (!isNotionNotFoundError(error)) {
               throw error;
             }
-            core.warning(
-              `[${doc.relPath}] Notion page missing, recreating: ${effectiveTitle}`,
-            );
+            core.warning(`[${doc.relPath}] Notion page missing, recreating: ${effectiveTitle}`);
             pageId = undefined;
           }
         }
@@ -168,14 +173,7 @@ async function run(): Promise<void> {
     }
 
     if (changedFiles.length > 0) {
-      await commitAndPush(
-        changedFiles,
-        "chore: store notion page ids",
-        githubToken,
-        (message) => core.info(message),
-        workspaceRoot,
-        failOnPushError,
-      );
+      await persistNotionIds(changedFiles, githubToken, commitStrategy, workspaceRoot);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -226,16 +224,16 @@ function normalizeFolderStrategy(value: string): FolderStrategy {
   return "subpages";
 }
 
-function normalizePushFailureMode(value: string): boolean {
+function normalizeCommitStrategy(value: string): CommitStrategy {
   const normalized = value.trim().toLowerCase();
-  if (!normalized || normalized === "fail") {
-    return true;
+  if (!normalized || normalized === "push") {
+    return "push";
   }
-  if (normalized === "warn") {
-    return false;
+  if (normalized === "pr" || normalized === "none") {
+    return normalized;
   }
-  core.warning(`Unknown push_failure_mode '${value}', defaulting to 'fail'.`);
-  return true;
+  core.warning(`Unknown commit_strategy '${value}', defaulting to 'push'.`);
+  return "push";
 }
 
 async function ensureDirectoryExists(dirPath: string): Promise<void> {
@@ -473,7 +471,6 @@ async function updatePageContent(
 }
 
 type CreatePageRequest = Parameters<Client["pages"]["create"]>[0];
-type UpdatePageRequest = Parameters<Client["pages"]["update"]>[0];
 type PageProperties = CreatePageRequest["properties"];
 
 function buildTitleProperty(title: string): PageProperties {
@@ -510,6 +507,79 @@ function normalizeFolderPath(relPath: string): string {
   return dir.replace(/^\/+/, "");
 }
 
+async function persistNotionIds(
+  changedFiles: string[],
+  githubToken: string,
+  commitStrategy: CommitStrategy,
+  workspaceRoot: string,
+): Promise<void> {
+  const commitMessage = "chore: store notion page ids";
+
+  if (commitStrategy === "none") {
+    core.info(`Skipping git update: commit_strategy='none'.`);
+    return;
+  }
+
+  if (commitStrategy === "push") {
+    await commitAndPush(
+      changedFiles,
+      commitMessage,
+      githubToken,
+      (message) => core.info(message),
+      workspaceRoot,
+    );
+    return;
+  }
+
+  const ownerRepo = process.env.GITHUB_REPOSITORY;
+  if (!ownerRepo) {
+    throw new Error("GITHUB_REPOSITORY is required for commit_strategy='pr'.");
+  }
+
+  const [owner, repo] = ownerRepo.split("/");
+  if (!owner || !repo) {
+    throw new Error(`Invalid GITHUB_REPOSITORY: ${ownerRepo}`);
+  }
+
+  const baseBranch = process.env.GITHUB_REF_NAME || (await getCurrentBranch(workspaceRoot));
+  const shortSha = await getShortSha(workspaceRoot);
+  const runId = process.env.GITHUB_RUN_ID || Date.now().toString();
+  const branchName = `notion-sync/${baseBranch}-${shortSha}-${runId}`;
+
+  await commitAndPushToBranch(
+    changedFiles,
+    commitMessage,
+    githubToken,
+    branchName,
+    (message) => core.info(message),
+    workspaceRoot,
+  );
+
+  const octokit = github.getOctokit(githubToken);
+  const existing = await octokit.rest.pulls.list({
+    owner,
+    repo,
+    head: `${owner}:${branchName}`,
+    state: "open",
+  });
+
+  if (existing.data.length > 0) {
+    core.info(`PR already exists: ${existing.data[0].html_url}`);
+    return;
+  }
+
+  const pr = await octokit.rest.pulls.create({
+    owner,
+    repo,
+    head: branchName,
+    base: baseBranch,
+    title: "docs: store notion page ids",
+    body: "Automated update of notion_page_id frontmatter for synced docs.",
+  });
+
+  core.info(`Opened PR: ${pr.data.html_url}`);
+}
+
 async function updateIndexBlock(
   notion: Client,
   indexBlockId: string,
@@ -522,13 +592,9 @@ async function updateIndexBlock(
   }
 
   if (!blockSupportsChildren(block.type)) {
-    const updated = await updateIndexInline(notion, block as BlockObjectResponse, documents);
-    if (!updated) {
-      core.warning(
-        `Index block type '${block.type}' does not support children. Skipping index update.`,
-      );
-    }
-    return;
+    throw new Error(
+      `Index block type '${block.type}' does not support children. Choose a block that supports children (toggle/callout/list/quote).`,
+    );
   }
 
   await clearChildren(notion, indexBlockId);
@@ -583,125 +649,6 @@ function blockSupportsChildren(type: string): boolean {
     "quote",
     "synced_block",
   ].includes(type);
-}
-
-function blockSupportsInlineRichText(type: string): boolean {
-  return [
-    "paragraph",
-    "heading_1",
-    "heading_2",
-    "heading_3",
-    "callout",
-    "toggle",
-    "bulleted_list_item",
-    "numbered_list_item",
-    "to_do",
-    "quote",
-  ].includes(type);
-}
-
-async function updateIndexInline(
-  notion: Client,
-  block: BlockObjectResponse,
-  documents: SyncResult[],
-): Promise<boolean> {
-  if (!blockSupportsInlineRichText(block.type)) {
-    return false;
-  }
-
-  const existingText = extractPlainText(block);
-  const baseText = existingText.split("\n")[0].trim();
-  const richText = buildInlineIndexRichText(baseText, documents);
-
-  const blockValue = ((block as Record<string, unknown>)[block.type] ?? {}) as {
-    color?: string;
-    icon?: unknown;
-    checked?: boolean;
-    is_toggleable?: boolean;
-    rich_text?: Array<{ plain_text?: string; text?: { content?: string } }>;
-  };
-  const updateValue: Record<string, unknown> = {
-    rich_text: richText,
-  };
-
-  if (blockValue?.color) {
-    updateValue.color = blockValue.color;
-  }
-  if (block.type === "callout" && blockValue?.icon) {
-    updateValue.icon = blockValue.icon;
-  }
-  if (block.type === "to_do" && typeof blockValue?.checked === "boolean") {
-    updateValue.checked = blockValue.checked;
-  }
-  if (
-    (block.type === "heading_1" || block.type === "heading_2" || block.type === "heading_3") &&
-    typeof blockValue?.is_toggleable === "boolean"
-  ) {
-    updateValue.is_toggleable = blockValue.is_toggleable;
-  }
-
-  const updatePayload = {
-    block_id: toDashedId(block.id),
-    [block.type]: updateValue,
-  } as unknown as Parameters<Client["blocks"]["update"]>[0];
-
-  await notion.blocks.update(updatePayload);
-
-  core.warning(
-    `Index block type '${block.type}' does not support children. Wrote list inline instead.`,
-  );
-  return true;
-}
-
-function extractPlainText(block: BlockObjectResponse): string {
-  const blockValue = ((block as Record<string, unknown>)[block.type] ?? {}) as {
-    rich_text?: Array<{ plain_text?: string; text?: { content?: string } }>;
-  };
-  if (!blockValue || !Array.isArray(blockValue.rich_text)) {
-    return "";
-  }
-  return blockValue.rich_text
-    .map((item: { plain_text?: string; text?: { content?: string } }) => {
-      if (typeof item.plain_text === "string") {
-        return item.plain_text;
-      }
-      return item.text?.content ?? "";
-    })
-    .join("");
-}
-
-function buildInlineIndexRichText(baseText: string, documents: SyncResult[]): NotionRichText[] {
-  const richText: NotionRichText[] = [];
-
-  if (baseText.length > 0) {
-    richText.push({
-      type: "text",
-      text: { content: baseText },
-    });
-  }
-
-  for (const doc of documents) {
-    const prefix = `${baseText.length > 0 || richText.length > 0 ? "\n" : ""}• `;
-    richText.push({
-      type: "text",
-      text: { content: prefix },
-    });
-    const chunks = splitText(doc.title, 2000);
-    if (chunks.length === 0) {
-      continue;
-    }
-    for (const chunk of chunks) {
-      richText.push({
-        type: "text",
-        text: {
-          content: chunk,
-          link: { url: doc.url },
-        },
-      });
-    }
-  }
-
-  return richText;
 }
 
 async function clearChildren(notion: Client, blockId: string): Promise<void> {

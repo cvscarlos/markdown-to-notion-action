@@ -41,6 +41,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   sync:
@@ -56,8 +57,8 @@ jobs:
           index_block_id: ${{ secrets.NOTION_INDEX_BLOCK_ID }}
           # Optional: subpages (default) or title_prefix
           folder_strategy: subpages
-          # Optional: fail (default) or warn
-          push_failure_mode: fail
+          # Optional: pr (default), push, or none
+          commit_strategy: pr
           github_token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
@@ -74,6 +75,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   sync:
@@ -89,22 +91,22 @@ jobs:
           parent_page_id: ${{ secrets.NOTION_PARENT_PAGE_ID }}
           # Optional: subpages (default) or title_prefix
           folder_strategy: subpages
-          # Optional: fail (default) or warn
-          push_failure_mode: fail
+          # Optional: pr (default), push, or none
+          commit_strategy: pr
           github_token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
 ## Inputs
 
-| Input             | Required | Description                                                                                                                  |
-| ----------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `notion_token`    | Yes      | Notion Integration Secret.                                                                                                   |
-| `docs_folder`     | Yes      | Folder containing Markdown files (relative to the repository root).                                                          |
-| `index_block_id`  | No       | Block ID/URL for the index list container. If provided, the index block is cleared and rebuilt every run.                    |
-| `parent_page_id`  | No       | Parent page ID/URL for new pages (used when `index_block_id` is not provided).                                               |
-| `folder_strategy` | No       | How to represent subfolders: `subpages` (default) creates nested pages; `title_prefix` prefixes titles with the folder path. |
-| `push_failure_mode` | No       | Behavior when git push fails: `fail` (default) or `warn`.                                                                   |
-| `github_token`    | Yes      | GitHub token used to commit `notion_page_id` back to files.                                                                  |
+| Input                  | Required | Description                                                                                                                  |
+| ---------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `notion_token`         | Yes      | Notion Integration Secret.                                                                                                   |
+| `docs_folder`          | Yes      | Folder containing Markdown files (relative to the repository root).                                                          |
+| `index_block_id`       | No       | Block ID/URL for the index list container. If provided, the index block is cleared and rebuilt every run.                    |
+| `parent_page_id`       | No       | Parent page ID/URL for new pages (used when `index_block_id` is not provided).                                               |
+| `folder_strategy`      | No       | How to represent subfolders: `subpages` (default) creates nested pages; `title_prefix` prefixes titles with the folder path. |
+| `commit_strategy`      | No       | How to persist `notion_page_id` updates: `pr` (default), `push`, or `none`.                                                  |
+| `github_token`         | No       | Required when `commit_strategy` is `push` or `pr`. Used to push commits or open PRs for `notion_page_id` updates.            |
 
 **Requirement:** You must provide either `index_block_id` **or** `parent_page_id`.
 
@@ -157,10 +159,13 @@ If `index_block_id` is provided, the action:
 
 ### 5) Git Write-Back
 
-If new pages are created, the action commits updated Markdown files back to the repo:
+If new pages are created, the action persists updated Markdown files back to the repo based on `commit_strategy`:
 
 - Commit message: `chore: store notion page ids`
-- Uses the provided `github_token` for the push.
+- `push`: commits and pushes directly to the current branch.
+- `pr`: commits to a new branch and opens a PR.
+- `none`: skips any git updates.
+- Uses the provided `github_token` for push/PR operations.
 
 ## Frontmatter Example
 
@@ -203,6 +208,7 @@ NOTION_TOKEN=secret_xxx
 DOCS_FOLDER=docs
 INDEX_BLOCK_ID=your_block_or_url
 PARENT_PAGE_ID=your_page_or_url
+# Required when commit_strategy=push or pr
 GITHUB_TOKEN=ghp_xxx
 ```
 
@@ -236,6 +242,13 @@ Ensure your workflow has:
 ```yaml
 permissions:
   contents: write
+```
+
+If you use `commit_strategy: pr`, also add:
+
+```yaml
+permissions:
+  pull-requests: write
 ```
 
 ### "Not found" errors from Notion
