@@ -11,7 +11,7 @@ inputs:
     required: true
 
   index_block_id:
-    description: "Anchor block ID/URL used to insert page links after this block"
+    description: "Anchor block ID/URL used to insert page shortcut links after this block"
     required: false
 
   parent_page_id:

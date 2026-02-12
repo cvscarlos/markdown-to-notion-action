@@ -23,8 +23,8 @@ This action:
 
 3. **Decide where pages will be created**
 
-- **Option A:** Provide `index_block_id` to insert page links after a specific block. Pages are created under that block’s parent page unless you also set `parent_page_id`.
-- **Option B:** Provide `parent_page_id` directly (no index block used).
+- **Default:** Provide `parent_page_id`. Pages are created under this parent and will appear at the end of the page (Notion API limitation).
+- **Optional:** Provide `index_block_id` to insert **shortcut links** after a specific block. Pages are still created under the parent page; only the shortcut list is inserted after the block.
 
 4. **Add a GitHub workflow**
 
@@ -110,8 +110,8 @@ jobs:
 | ------------------------ | -------- | ----------------------------------------------------------------------------------------------------------------- |
 | `notion_token`           | Yes      | Notion Integration Secret.                                                                                        |
 | `docs_folder`            | Yes      | Folder containing Markdown files (relative to the repository root).                                               |
-| `index_block_id`         | No       | Anchor block ID/URL. The action appends page links after this block.                                              |
-| `parent_page_id`         | No       | Parent page ID/URL for new pages. If omitted, the parent is derived from `index_block_id`.                        |
+| `index_block_id`         | No       | Anchor block ID/URL. The action appends shortcut (`link_to_page`) blocks after this block.                        |
+| `parent_page_id`         | No       | Parent page ID/URL for new pages. Pages are created at the end of the parent page (Notion API limitation).        |
 | `title_prefix_separator` | No       | Separator used between folder names and the title. Default: `→`.                                                  |
 | `commit_strategy`        | No       | How to persist `notion_page_id` updates: `pr` (default), `push`, or `none`.                                       |
 | `github_token`           | No       | Required when `commit_strategy` is `push` or `pr`. Used to push commits or open PRs for `notion_page_id` updates. |
@@ -159,7 +159,7 @@ Supported conversions include:
 
 ### 4) Index Block (Optional)
 
-If `index_block_id` is provided, the action appends `link_to_page` blocks **after** that block. The block itself is not modified.
+If `index_block_id` is provided, the action appends `link_to_page` shortcut blocks **after** that block. The block itself is not modified, and the full pages are still created at the end of the parent page.
 
 ### 5) Git Write-Back
 
