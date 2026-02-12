@@ -54,6 +54,8 @@ jobs:
           notion_token: ${{ secrets.NOTION_TOKEN }}
           docs_folder: docs
           index_block_id: ${{ secrets.NOTION_INDEX_BLOCK_ID }}
+          # Optional: subpages (default) or title_prefix
+          folder_strategy: subpages
           github_token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
@@ -83,18 +85,21 @@ jobs:
           notion_token: ${{ secrets.NOTION_TOKEN }}
           docs_folder: docs
           parent_page_id: ${{ secrets.NOTION_PARENT_PAGE_ID }}
+          # Optional: subpages (default) or title_prefix
+          folder_strategy: subpages
           github_token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
 ## Inputs
 
-| Input            | Required | Description                                                                                               |
-| ---------------- | -------- | --------------------------------------------------------------------------------------------------------- |
-| `notion_token`   | Yes      | Notion Integration Secret.                                                                                |
-| `docs_folder`    | Yes      | Folder containing Markdown files (relative to the repository root).                                       |
-| `index_block_id` | No       | Block ID/URL for the index list container. If provided, the index block is cleared and rebuilt every run. |
-| `parent_page_id` | No       | Parent page ID/URL for new pages (used when `index_block_id` is not provided).                            |
-| `github_token`   | Yes      | GitHub token used to commit `notion_page_id` back to files.                                               |
+| Input             | Required | Description                                                                                                                  |
+| ----------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `notion_token`    | Yes      | Notion Integration Secret.                                                                                                   |
+| `docs_folder`     | Yes      | Folder containing Markdown files (relative to the repository root).                                                          |
+| `index_block_id`  | No       | Block ID/URL for the index list container. If provided, the index block is cleared and rebuilt every run.                    |
+| `parent_page_id`  | No       | Parent page ID/URL for new pages (used when `index_block_id` is not provided).                                               |
+| `folder_strategy` | No       | How to represent subfolders: `subpages` (default) creates nested pages; `title_prefix` prefixes titles with the folder path. |
+| `github_token`    | Yes      | GitHub token used to commit `notion_page_id` back to files.                                                                  |
 
 **Requirement:** You must provide either `index_block_id` **or** `parent_page_id`.
 
@@ -127,6 +132,11 @@ Supported conversions include:
 - Horizontal rules
 - Tables
 - `Table of Contents` / `[TOC]` placeholders → Notion `table_of_contents` block
+
+**Folder strategy:**
+
+- `subpages` (default): `docs/shopify/overview.md` becomes a page under a `shopify` subpage.
+- `title_prefix`: `docs/shopify/overview.md` becomes a page titled `shopify/Overview`.
 
 **Safety rules:**
 

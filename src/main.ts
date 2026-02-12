@@ -4,13 +4,13 @@ import type {
   BlockObjectRequest,
   BlockObjectResponse,
   PartialBlockObjectResponse,
-  RichTextItemRequest,
 } from "@notionhq/client/build/src/api-endpoints";
 import fm from "front-matter";
 import dotenv from "dotenv";
 import * as fs from "fs/promises";
 import * as path from "path";
 import { markdownToNotionBlocks, extractTitle } from "./markdown-to-notion";
+import type { NotionBlock, NotionRichText } from "./notion-types";
 import { commitAndPush } from "./git-utils";
 
 dotenv.config();
@@ -33,12 +33,15 @@ type SyncResult = {
   filePath: string;
 };
 
+type FolderStrategy = "subpages" | "title_prefix";
+
 async function run(): Promise<void> {
   try {
     const notionToken = readInput("notion_token", ["NOTION_TOKEN"]);
     const docsFolder = readInput("docs_folder", ["DOCS_FOLDER"]);
     const indexBlockInput = readInput("index_block_id", ["INDEX_BLOCK_ID"]);
     const parentPageInput = readInput("parent_page_id", ["PARENT_PAGE_ID"]);
+    const folderStrategyInput = readInput("folder_strategy", ["FOLDER_STRATEGY"]);
     const githubToken = readInput("github_token", ["GITHUB_TOKEN"]);
 
     if (!notionToken || !docsFolder || !githubToken) {
@@ -62,6 +65,7 @@ async function run(): Promise<void> {
     const parentPageId = indexBlockId
       ? await resolveParentPageId(notion, indexBlockId)
       : normalizeNotionId(parentPageInput);
+    const folderStrategy = normalizeFolderStrategy(folderStrategyInput);
 
     const markdownFiles = await collectMarkdownFiles(docsFolderPath);
     if (markdownFiles.length === 0) {
@@ -79,6 +83,7 @@ async function run(): Promise<void> {
 
     const changedFiles: string[] = [];
     const syncedDocs: SyncResult[] = [];
+    const folderPageCache = new Map<string, string>();
 
     for (const doc of documents) {
       try {
@@ -90,15 +95,18 @@ async function run(): Promise<void> {
           logger: (message) => core.info(`[${doc.relPath}] ${message}`),
         });
 
-        const title = doc.title || "Untitled";
+        const effectiveTitle = buildTitleWithStrategy(doc, folderStrategy);
         let pageId = doc.notionPageId;
         let pageUrl = doc.notionUrl;
-
         if (pageId) {
-          await updatePageContent(notion, pageId, title, blocks);
+          await updatePageContent(notion, pageId, effectiveTitle, blocks);
           pageUrl = notionPageUrl(pageId);
         } else {
-          const created = await createPage(notion, parentPageId, title);
+          const pageParentId =
+            folderStrategy === "subpages"
+              ? await resolveFolderParentPage(notion, parentPageId, doc.relPath, folderPageCache)
+              : parentPageId;
+          const created = await createPage(notion, pageParentId, effectiveTitle);
           pageId = normalizeNotionId(created.id);
           pageUrl = created.url || notionPageUrl(pageId);
           await appendBlocksSafe(notion, pageId, blocks, (msg) =>
@@ -119,7 +127,7 @@ async function run(): Promise<void> {
         if (pageId && pageUrl) {
           knownPageUrls.set(doc.absPath, pageUrl);
           syncedDocs.push({
-            title,
+            title: effectiveTitle,
             pageId,
             url: pageUrl,
             filePath: doc.absPath,
@@ -166,6 +174,18 @@ function readInput(name: string, envFallbacks: string[]): string {
     }
   }
   return "";
+}
+
+function normalizeFolderStrategy(value: string): FolderStrategy {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return "subpages";
+  }
+  if (normalized === "subpages" || normalized === "title_prefix") {
+    return normalized;
+  }
+  core.warning(`Unknown folder_strategy '${value}', defaulting to 'subpages'.`);
+  return "subpages";
 }
 
 async function ensureDirectoryExists(dirPath: string): Promise<void> {
@@ -305,19 +325,94 @@ async function createPage(
   notion: Client,
   parentPageId: string,
   title: string,
-): Promise<{ id: string; url: string | null } & Record<string, unknown>> {
+): Promise<{ id: string; url?: string | null }> {
   const response = await notion.pages.create({
     parent: { page_id: toDashedId(parentPageId) },
     properties: buildTitleProperty(title),
   });
-  return response;
+  return {
+    id: response.id,
+    url: "url" in response ? response.url : null,
+  };
+}
+
+async function resolveFolderParentPage(
+  notion: Client,
+  rootPageId: string,
+  relPath: string,
+  cache: Map<string, string>,
+): Promise<string> {
+  const folderPath = normalizeFolderPath(relPath);
+  if (!folderPath) {
+    return rootPageId;
+  }
+
+  const segments = folderPath.split("/");
+  let currentParentId = rootPageId;
+  let currentPath = "";
+
+  for (const segment of segments) {
+    if (!segment) {
+      continue;
+    }
+    currentPath = currentPath ? `${currentPath}/${segment}` : segment;
+    const cached = cache.get(currentPath);
+    if (cached) {
+      currentParentId = cached;
+      continue;
+    }
+
+    const pageId = await findOrCreateChildPage(notion, currentParentId, segment);
+    cache.set(currentPath, pageId);
+    currentParentId = pageId;
+  }
+
+  return currentParentId;
+}
+
+async function findOrCreateChildPage(
+  notion: Client,
+  parentPageId: string,
+  title: string,
+): Promise<string> {
+  const existing = await findChildPageByTitle(notion, parentPageId, title);
+  if (existing) {
+    return existing;
+  }
+
+  const created = await notion.pages.create({
+    parent: { page_id: toDashedId(parentPageId) },
+    properties: buildTitleProperty(title),
+  });
+  return normalizeNotionId(created.id);
+}
+
+async function findChildPageByTitle(
+  notion: Client,
+  parentPageId: string,
+  title: string,
+): Promise<string | null> {
+  const children = await listAllChildren(notion, parentPageId);
+  for (const child of children) {
+    if (!("type" in child)) {
+      continue;
+    }
+    if (child.type !== "child_page") {
+      continue;
+    }
+    const childTitle = (child as { child_page?: { title?: string } }).child_page?.title;
+    if (childTitle === title) {
+      return normalizeNotionId(child.id);
+    }
+  }
+  return null;
 }
 
 async function updatePageContent(
   notion: Client,
   pageId: string,
   title: string,
-  blocks: BlockObjectRequest[],
+  blocks: NotionBlock[],
 ): Promise<void> {
   await notion.pages.update({
     page_id: toDashedId(pageId),
@@ -327,7 +422,11 @@ async function updatePageContent(
   await appendBlocksSafe(notion, pageId, blocks, (msg) => core.warning(msg));
 }
 
-function buildTitleProperty(title: string): Record<string, unknown> {
+type CreatePageRequest = Parameters<Client["pages"]["create"]>[0];
+type UpdatePageRequest = Parameters<Client["pages"]["update"]>[0];
+type PageProperties = CreatePageRequest["properties"];
+
+function buildTitleProperty(title: string): PageProperties {
   return {
     title: {
       title: [
@@ -337,7 +436,28 @@ function buildTitleProperty(title: string): Record<string, unknown> {
         },
       ],
     },
-  };
+  } as PageProperties;
+}
+
+function buildTitleWithStrategy(doc: DocEntry, strategy: FolderStrategy): string {
+  const baseTitle = doc.title || "Untitled";
+  if (strategy !== "title_prefix") {
+    return baseTitle;
+  }
+  const folderPath = normalizeFolderPath(doc.relPath);
+  if (!folderPath) {
+    return baseTitle;
+  }
+  return `${folderPath}/${baseTitle}`;
+}
+
+function normalizeFolderPath(relPath: string): string {
+  const normalized = relPath.replace(/\\/g, "/");
+  const dir = path.posix.dirname(normalized);
+  if (dir === "." || dir === "/") {
+    return "";
+  }
+  return dir.replace(/^\/+/, "");
 }
 
 async function updateIndexBlock(
@@ -363,7 +483,7 @@ async function updateIndexBlock(
 
   await clearChildren(notion, indexBlockId);
 
-  const listBlocks: BlockObjectRequest[] = [];
+  const listBlocks: NotionBlock[] = [];
   for (const doc of documents) {
     listBlocks.push(...buildIndexListItemBlocks(doc.title, doc.url));
   }
@@ -371,7 +491,7 @@ async function updateIndexBlock(
   await appendBlocksSafe(notion, indexBlockId, listBlocks, (msg) => core.warning(msg));
 }
 
-function buildIndexListItemBlocks(title: string, url: string): BlockObjectRequest[] {
+function buildIndexListItemBlocks(title: string, url: string): NotionBlock[] {
   const chunks = splitText(title, 2000);
   return chunks.map((chunk) => ({
     type: "bulleted_list_item",
@@ -443,7 +563,13 @@ async function updateIndexInline(
   const baseText = existingText.split("\n")[0].trim();
   const richText = buildInlineIndexRichText(baseText, documents);
 
-  const blockValue = (block as Record<string, any>)[block.type];
+  const blockValue = ((block as Record<string, unknown>)[block.type] ?? {}) as {
+    color?: string;
+    icon?: unknown;
+    checked?: boolean;
+    is_toggleable?: boolean;
+    rich_text?: Array<{ plain_text?: string; text?: { content?: string } }>;
+  };
   const updateValue: Record<string, unknown> = {
     rich_text: richText,
   };
@@ -458,18 +584,18 @@ async function updateIndexInline(
     updateValue.checked = blockValue.checked;
   }
   if (
-    (block.type === "heading_1" ||
-      block.type === "heading_2" ||
-      block.type === "heading_3") &&
+    (block.type === "heading_1" || block.type === "heading_2" || block.type === "heading_3") &&
     typeof blockValue?.is_toggleable === "boolean"
   ) {
     updateValue.is_toggleable = blockValue.is_toggleable;
   }
 
-  await notion.blocks.update({
+  const updatePayload = {
     block_id: toDashedId(block.id),
     [block.type]: updateValue,
-  });
+  } as unknown as Parameters<Client["blocks"]["update"]>[0];
+
+  await notion.blocks.update(updatePayload);
 
   core.warning(
     `Index block type '${block.type}' does not support children. Wrote list inline instead.`,
@@ -478,7 +604,9 @@ async function updateIndexInline(
 }
 
 function extractPlainText(block: BlockObjectResponse): string {
-  const blockValue = (block as Record<string, any>)[block.type];
+  const blockValue = ((block as Record<string, unknown>)[block.type] ?? {}) as {
+    rich_text?: Array<{ plain_text?: string; text?: { content?: string } }>;
+  };
   if (!blockValue || !Array.isArray(blockValue.rich_text)) {
     return "";
   }
@@ -492,11 +620,8 @@ function extractPlainText(block: BlockObjectResponse): string {
     .join("");
 }
 
-function buildInlineIndexRichText(
-  baseText: string,
-  documents: SyncResult[],
-): RichTextItemRequest[] {
-  const richText: RichTextItemRequest[] = [];
+function buildInlineIndexRichText(baseText: string, documents: SyncResult[]): NotionRichText[] {
+  const richText: NotionRichText[] = [];
 
   if (baseText.length > 0) {
     richText.push({
@@ -564,7 +689,7 @@ async function listAllChildren(
 async function appendBlocksSafe(
   notion: Client,
   blockId: string,
-  blocks: BlockObjectRequest[],
+  blocks: NotionBlock[],
   logger: (message: string) => void,
 ): Promise<void> {
   if (blocks.length === 0) {
@@ -573,10 +698,11 @@ async function appendBlocksSafe(
 
   const chunks = chunkArray(blocks, 50);
   for (const chunk of chunks) {
+    const requestChunk = toNotionBlockRequests(chunk);
     try {
       await notion.blocks.children.append({
         block_id: toDashedId(blockId),
-        children: chunk,
+        children: requestChunk,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -585,7 +711,7 @@ async function appendBlocksSafe(
         try {
           await notion.blocks.children.append({
             block_id: toDashedId(blockId),
-            children: [block],
+            children: toNotionBlockRequests([block]),
           });
         } catch (blockError) {
           const blockMessage =
@@ -603,6 +729,10 @@ function chunkArray<T>(items: T[], size: number): T[][] {
     chunks.push(items.slice(i, i + size));
   }
   return chunks;
+}
+
+function toNotionBlockRequests(blocks: NotionBlock[]): BlockObjectRequest[] {
+  return blocks as unknown as BlockObjectRequest[];
 }
 
 function upsertFrontMatter(content: string, key: string, value: string): string {

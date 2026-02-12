@@ -1,9 +1,12 @@
 import MarkdownIt from "markdown-it";
-import type Token from "markdown-it/lib/token";
-import type {
-  BlockObjectRequest,
-  RichTextItemRequest,
-} from "@notionhq/client/build/src/api-endpoints";
+import type { Token } from "markdown-it";
+import {
+  NOTION_CODE_LANGUAGES,
+  type NotionBlock,
+  type NotionCodeLanguage,
+  type NotionColor,
+  type NotionRichText,
+} from "./notion-types";
 
 export type Logger = (message: string) => void;
 
@@ -12,6 +15,8 @@ export type MarkdownToNotionOptions = {
   logger?: Logger;
 };
 
+export type RichTextItemRequest = NotionRichText;
+
 const md = new MarkdownIt({
   html: false,
   linkify: true,
@@ -19,81 +24,7 @@ const md = new MarkdownIt({
 
 const MAX_TEXT_LENGTH = 2000;
 
-const ALLOWED_CODE_LANGUAGES = new Set([
-  "abap",
-  "arduino",
-  "bash",
-  "basic",
-  "c",
-  "clojure",
-  "coffeescript",
-  "c++",
-  "c#",
-  "css",
-  "dart",
-  "diff",
-  "docker",
-  "elixir",
-  "elm",
-  "erlang",
-  "flow",
-  "fortran",
-  "f#",
-  "gherkin",
-  "glsl",
-  "go",
-  "graphql",
-  "groovy",
-  "haskell",
-  "html",
-  "java",
-  "javascript",
-  "json",
-  "julia",
-  "kotlin",
-  "latex",
-  "less",
-  "lisp",
-  "livescript",
-  "lua",
-  "makefile",
-  "markdown",
-  "markup",
-  "matlab",
-  "mermaid",
-  "nix",
-  "objective-c",
-  "ocaml",
-  "pascal",
-  "perl",
-  "php",
-  "plain text",
-  "powershell",
-  "prolog",
-  "protobuf",
-  "python",
-  "r",
-  "reason",
-  "ruby",
-  "rust",
-  "sass",
-  "scala",
-  "scheme",
-  "scss",
-  "shell",
-  "solidity",
-  "sql",
-  "swift",
-  "toml",
-  "typescript",
-  "vb.net",
-  "verilog",
-  "vhdl",
-  "visual basic",
-  "webassembly",
-  "xml",
-  "yaml",
-]);
+const ALLOWED_CODE_LANGUAGES = new Set(NOTION_CODE_LANGUAGES);
 
 const TABLE_OF_CONTENTS_LABELS = new Set([
   "table of contents",
@@ -127,7 +58,7 @@ type ParseState = {
 export function markdownToNotionBlocks(
   markdown: string,
   options: MarkdownToNotionOptions = {},
-): BlockObjectRequest[] {
+): NotionBlock[] {
   const tokens = md.parse(markdown, {});
   const state: ParseState = { index: 0 };
   return parseTokens(tokens, state, options);
@@ -138,8 +69,8 @@ function parseTokens(
   state: ParseState,
   options: MarkdownToNotionOptions,
   stopOnTypes: string[] = [],
-): BlockObjectRequest[] {
-  const blocks: BlockObjectRequest[] = [];
+): NotionBlock[] {
+  const blocks: NotionBlock[] = [];
 
   while (state.index < tokens.length) {
     const token = tokens[state.index];
@@ -251,8 +182,8 @@ function parseList(
   state: ParseState,
   listType: "bulleted" | "numbered",
   options: MarkdownToNotionOptions,
-): BlockObjectRequest[] {
-  const blocks: BlockObjectRequest[] = [];
+): NotionBlock[] {
+  const blocks: NotionBlock[] = [];
   const closeType = listType === "bulleted" ? "bullet_list_close" : "ordered_list_close";
 
   while (state.index < tokens.length) {
@@ -264,7 +195,7 @@ function parseList(
     if (token.type === "list_item_open") {
       state.index += 1;
       const { richText, children } = parseListItem(tokens, state, options);
-      const block: BlockObjectRequest =
+      const block: NotionBlock =
         listType === "bulleted"
           ? {
               type: "bulleted_list_item",
@@ -296,7 +227,7 @@ function parseTable(
   tokens: Token[],
   state: ParseState,
   options: MarkdownToNotionOptions,
-): BlockObjectRequest[] {
+): NotionBlock[] {
   const rows: RichTextItemRequest[][][] = [];
   let inHead = false;
   let hasColumnHeader = false;
@@ -355,8 +286,8 @@ function parseTable(
     return padded;
   });
 
-  const tableRows: BlockObjectRequest[] = normalizedRows.map((row) => ({
-    type: "table_row",
+  const tableRows = normalizedRows.map((row) => ({
+    type: "table_row" as const,
     table_row: {
       cells: row.map((cell) => normalizeRichTextForCell(cell)),
     },
@@ -443,9 +374,9 @@ function parseListItem(
   tokens: Token[],
   state: ParseState,
   options: MarkdownToNotionOptions,
-): { richText: RichTextItemRequest[]; children: BlockObjectRequest[] } {
+): { richText: RichTextItemRequest[]; children: NotionBlock[] } {
   let richText: RichTextItemRequest[] = [];
-  const children: BlockObjectRequest[] = [];
+  const children: NotionBlock[] = [];
 
   while (state.index < tokens.length) {
     const token = tokens[state.index];
@@ -509,15 +440,21 @@ function inlineToRichText(inline: Token, options: MarkdownToNotionOptions): Rich
   }
 
   const richText: RichTextItemRequest[] = [];
-  const annotations = {
+  const current: {
+    bold: boolean;
+    italic: boolean;
+    code: boolean;
+    strikethrough: boolean;
+    underline: boolean;
+    color: NotionColor;
+  } = {
     bold: false,
     italic: false,
     code: false,
     strikethrough: false,
     underline: false,
     color: "default",
-  } as const;
-  const current = { ...annotations };
+  };
   let currentLink: string | null = null;
 
   const pushText = (text: string, override?: Partial<typeof current>) => {
@@ -635,20 +572,20 @@ function createText(content: string): RichTextItemRequest {
   };
 }
 
-function createParagraphBlocks(richText: RichTextItemRequest[]): BlockObjectRequest[] {
-  return splitRichTextByLength(richText).map((chunk) => ({
-    type: "paragraph",
-    paragraph: {
-      rich_text: chunk,
-      color: "default",
-    },
-  }));
+function createParagraphBlocks(richText: RichTextItemRequest[]): NotionBlock[] {
+  return splitRichTextByLength(richText).map(
+    (chunk) =>
+      ({
+        type: "paragraph",
+        paragraph: {
+          rich_text: chunk,
+          color: "default",
+        },
+      }) as NotionBlock,
+  );
 }
 
-function createHeadingBlocks(
-  level: 1 | 2 | 3,
-  richText: RichTextItemRequest[],
-): BlockObjectRequest[] {
+function createHeadingBlocks(level: 1 | 2 | 3, richText: RichTextItemRequest[]): NotionBlock[] {
   const chunks = splitRichTextByLength(richText);
   return chunks.map((chunk) => {
     const headingType = level === 1 ? "heading_1" : level === 2 ? "heading_2" : "heading_3";
@@ -658,22 +595,25 @@ function createHeadingBlocks(
         rich_text: chunk,
         color: "default",
       },
-    } as BlockObjectRequest;
+    } as NotionBlock;
   });
 }
 
-function createCodeBlocks(content: string, language: string): BlockObjectRequest[] {
+function createCodeBlocks(content: string, language: NotionCodeLanguage): NotionBlock[] {
   const chunks = splitTextByLength(content);
-  return chunks.map((chunk) => ({
-    type: "code",
-    code: {
-      rich_text: [createText(chunk)],
-      language,
-    },
-  }));
+  return chunks.map(
+    (chunk) =>
+      ({
+        type: "code",
+        code: {
+          rich_text: [createText(chunk)],
+          language,
+        },
+      }) as NotionBlock,
+  );
 }
 
-function wrapQuote(block: BlockObjectRequest): BlockObjectRequest {
+function wrapQuote(block: NotionBlock): NotionBlock {
   if (block.type === "paragraph") {
     return {
       type: "quote",
@@ -709,7 +649,7 @@ function isTableOfContentsLabel(text: string): boolean {
   return TABLE_OF_CONTENTS_LABELS.has(normalized);
 }
 
-function createTableOfContentsBlock(): BlockObjectRequest {
+function createTableOfContentsBlock(): NotionBlock {
   return {
     type: "table_of_contents",
     table_of_contents: {
@@ -718,7 +658,7 @@ function createTableOfContentsBlock(): BlockObjectRequest {
   };
 }
 
-function normalizeCodeLanguage(info: string): string {
+function normalizeCodeLanguage(info: string): NotionCodeLanguage {
   const raw = info.trim().toLowerCase();
   if (raw.length === 0) {
     return "plain text";
@@ -735,10 +675,14 @@ function normalizeCodeLanguage(info: string): string {
   if (raw === "sh" || raw === "shell" || raw === "zsh") {
     return "bash";
   }
-  if (ALLOWED_CODE_LANGUAGES.has(raw)) {
+  if (isNotionCodeLanguage(raw)) {
     return raw;
   }
   return "plain text";
+}
+
+function isNotionCodeLanguage(value: string): value is NotionCodeLanguage {
+  return ALLOWED_CODE_LANGUAGES.has(value as NotionCodeLanguage);
 }
 
 function splitRichTextByLength(richText: RichTextItemRequest[]): RichTextItemRequest[][] {
@@ -798,9 +742,7 @@ function splitRichTextByLength(richText: RichTextItemRequest[]): RichTextItemReq
   return chunks;
 }
 
-function normalizeRichTextForCell(
-  richText: RichTextItemRequest[],
-): RichTextItemRequest[] {
+function normalizeRichTextForCell(richText: RichTextItemRequest[]): RichTextItemRequest[] {
   const normalized: RichTextItemRequest[] = [];
 
   for (const item of richText) {

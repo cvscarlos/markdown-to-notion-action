@@ -17,6 +17,11 @@ inputs:
     description: "Notion page ID where files will be created when index_block_id is not provided"
     required: false
 
+  folder_strategy:
+    description: "How to represent subfolders: 'subpages' creates nested pages, 'title_prefix' prefixes titles with folder path"
+    required: false
+    default: "subpages"
+
   github_token:
     description: "GitHub token used to commit notion_page_id updates"
     required: true
@@ -38,10 +43,12 @@ runs:
         INPUT_DOCS_FOLDER: ${{ inputs.docs_folder }}
         INPUT_INDEX_BLOCK_ID: ${{ inputs.index_block_id }}
         INPUT_PARENT_PAGE_ID: ${{ inputs.parent_page_id }}
+        INPUT_FOLDER_STRATEGY: ${{ inputs.folder_strategy }}
         INPUT_GITHUB_TOKEN: ${{ inputs.github_token }}
 
         NOTION_TOKEN: ${{ inputs.notion_token }}
         DOCS_FOLDER: ${{ inputs.docs_folder }}
         INDEX_BLOCK_ID: ${{ inputs.index_block_id }}
         PARENT_PAGE_ID: ${{ inputs.parent_page_id }}
+        FOLDER_STRATEGY: ${{ inputs.folder_strategy }}
         GITHUB_TOKEN: ${{ inputs.github_token }}
