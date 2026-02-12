@@ -42,6 +42,7 @@ async function run(): Promise<void> {
     const indexBlockInput = readInput("index_block_id", ["INDEX_BLOCK_ID"]);
     const parentPageInput = readInput("parent_page_id", ["PARENT_PAGE_ID"]);
     const folderStrategyInput = readInput("folder_strategy", ["FOLDER_STRATEGY"]);
+    const pushFailureModeInput = readInput("push_failure_mode", ["PUSH_FAILURE_MODE"]);
     const githubToken = readInput("github_token", ["GITHUB_TOKEN"]);
 
     if (!notionToken || !docsFolder || !githubToken) {
@@ -66,6 +67,7 @@ async function run(): Promise<void> {
       ? await resolveParentPageId(notion, indexBlockId)
       : normalizeNotionId(parentPageInput);
     const folderStrategy = normalizeFolderStrategy(folderStrategyInput);
+    const failOnPushError = normalizePushFailureMode(pushFailureModeInput);
 
     const markdownFiles = await collectMarkdownFiles(docsFolderPath);
     if (markdownFiles.length === 0) {
@@ -87,6 +89,7 @@ async function run(): Promise<void> {
 
     for (const doc of documents) {
       try {
+        core.info(`[${doc.relPath}] Sync start: ${doc.title}`);
         const resolveLink = (href: string) =>
           resolveRelativeLink(href, doc.absPath, docsFolderPath, knownPageUrls);
 
@@ -99,9 +102,22 @@ async function run(): Promise<void> {
         let pageId = doc.notionPageId;
         let pageUrl = doc.notionUrl;
         if (pageId) {
-          await updatePageContent(notion, pageId, effectiveTitle, blocks);
-          pageUrl = notionPageUrl(pageId);
-        } else {
+          try {
+            await updatePageContent(notion, pageId, effectiveTitle, blocks);
+            pageUrl = notionPageUrl(pageId);
+            core.info(`[${doc.relPath}] Updated page: ${effectiveTitle}`);
+          } catch (error) {
+            if (!isNotionNotFoundError(error)) {
+              throw error;
+            }
+            core.warning(
+              `[${doc.relPath}] Notion page missing, recreating: ${effectiveTitle}`,
+            );
+            pageId = undefined;
+          }
+        }
+
+        if (!pageId) {
           const pageParentId =
             folderStrategy === "subpages"
               ? await resolveFolderParentPage(notion, parentPageId, doc.relPath, folderPageCache)
@@ -109,6 +125,10 @@ async function run(): Promise<void> {
           const created = await createPage(notion, pageParentId, effectiveTitle);
           pageId = normalizeNotionId(created.id);
           pageUrl = created.url || notionPageUrl(pageId);
+          core.info(`[${doc.relPath}] Created page: ${effectiveTitle}`);
+          if (pageUrl) {
+            core.info(`[${doc.relPath}] Page URL: ${pageUrl}`);
+          }
           await appendBlocksSafe(notion, pageId, blocks, (msg) =>
             core.warning(`[${doc.relPath}] ${msg}`),
           );
@@ -154,6 +174,7 @@ async function run(): Promise<void> {
         githubToken,
         (message) => core.info(message),
         workspaceRoot,
+        failOnPushError,
       );
     }
   } catch (error) {
@@ -176,6 +197,23 @@ function readInput(name: string, envFallbacks: string[]): string {
   return "";
 }
 
+function isNotionNotFoundError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const err = error as { code?: string; status?: number; message?: string };
+  if (err.code === "object_not_found") {
+    return true;
+  }
+  if (err.status === 404) {
+    return true;
+  }
+  if (typeof err.message === "string" && err.message.toLowerCase().includes("not found")) {
+    return true;
+  }
+  return false;
+}
+
 function normalizeFolderStrategy(value: string): FolderStrategy {
   const normalized = value.trim().toLowerCase();
   if (!normalized) {
@@ -186,6 +224,18 @@ function normalizeFolderStrategy(value: string): FolderStrategy {
   }
   core.warning(`Unknown folder_strategy '${value}', defaulting to 'subpages'.`);
   return "subpages";
+}
+
+function normalizePushFailureMode(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized || normalized === "fail") {
+    return true;
+  }
+  if (normalized === "warn") {
+    return false;
+  }
+  core.warning(`Unknown push_failure_mode '${value}', defaulting to 'fail'.`);
+  return true;
 }
 
 async function ensureDirectoryExists(dirPath: string): Promise<void> {

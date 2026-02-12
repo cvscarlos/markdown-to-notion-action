@@ -24,6 +24,7 @@ export async function commitAndPush(
   githubToken: string,
   logger: Logger,
   repoRoot?: string,
+  failOnPushError = true,
 ): Promise<void> {
   if (filePaths.length === 0) {
     return;
@@ -44,7 +45,15 @@ export async function commitAndPush(
   await runCommand("git", ["config", "user.name", "github-actions[bot]"], repoRoot);
   await runCommand("git", ["commit", "-m", message], repoRoot);
 
-  await pushWithToken(githubToken, logger, repoRoot);
+  try {
+    await pushWithToken(githubToken, logger, repoRoot);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (failOnPushError) {
+      throw new Error(`Git push failed: ${message}`);
+    }
+    logger(`Git push failed (non-fatal): ${message}`);
+  }
 }
 
 async function pushWithToken(
