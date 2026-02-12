@@ -6,12 +6,7 @@ import * as fs from "fs/promises";
 import * as path from "path";
 import { markdownToNotionBlocks, extractTitle } from "./markdown-to-notion.js";
 import type { NotionBlock } from "./notion-types.js";
-import {
-  commitAndPush,
-  commitAndPushToBranch,
-  getCurrentBranch,
-  getShortSha,
-} from "./git-utils.js";
+import { commitAndPush, commitAndPushToBranch, getCurrentBranch } from "./git-utils.js";
 
 type AppendChildrenRequest = Parameters<Client["blocks"]["children"]["append"]>[0];
 type AppendChildren = AppendChildrenRequest["children"];
@@ -38,16 +33,23 @@ type SyncedPage = {
   title: string;
 };
 
+type MappingEntry = {
+  pageId: string;
+  title?: string;
+};
+
 async function run(): Promise<void> {
   try {
     const notionToken = readInput("notion_token", ["NOTION_TOKEN"]);
     const docsFolder = readInput("docs_folder", ["DOCS_FOLDER"]);
+    const mappingFileInput = readInput("notion_mapping_file", ["NOTION_MAPPING_FILE"]);
     const indexBlockInput = readInput("index_block_id", ["INDEX_BLOCK_ID"]);
     const parentPageInput = readInput("parent_page_id", ["PARENT_PAGE_ID"]);
     const titlePrefixSeparatorInput = readInput("title_prefix_separator", [
       "TITLE_PREFIX_SEPARATOR",
     ]);
     const commitStrategyInput = readInput("commit_strategy", ["COMMIT_STRATEGY"]);
+    const prBranchPrefixInput = readInput("pr_branch_prefix", ["PR_BRANCH_PREFIX"]);
     const githubToken = readInput("github_token", ["GITHUB_TOKEN"]);
     const commitStrategy = normalizeCommitStrategy(commitStrategyInput);
 
@@ -69,6 +71,7 @@ async function run(): Promise<void> {
     const workspaceRoot = process.env.GITHUB_WORKSPACE || process.cwd();
     const docsFolderPath = path.resolve(workspaceRoot, docsFolder);
     await ensureDirectoryExists(docsFolderPath);
+    const mappingFilePath = resolveMappingFilePath(docsFolderPath, workspaceRoot, mappingFileInput);
 
     const indexBlockId = indexBlockInput ? normalizeNotionId(indexBlockInput) : null;
     const indexParentPageId = indexBlockId ? await resolveParentPageId(notion, indexBlockId) : null;
@@ -78,13 +81,15 @@ async function run(): Promise<void> {
       throw new Error("Either index_block_id or parent_page_id must be provided.");
     }
     const titlePrefixSeparator = normalizeTitlePrefixSeparator(titlePrefixSeparatorInput);
+    const prBranchPrefix = normalizePrBranchPrefix(prBranchPrefixInput);
 
-    const markdownFiles = await collectMarkdownFiles(docsFolderPath);
+    const markdownFiles = await collectMarkdownFiles(docsFolderPath, mappingFilePath);
     if (markdownFiles.length === 0) {
       core.warning(`No markdown files found in ${docsFolderPath}.`);
     }
 
-    const documents = await loadDocuments(markdownFiles, docsFolderPath);
+    const mappingEntries = await readMappingFile(mappingFilePath);
+    const documents = await loadDocuments(markdownFiles, docsFolderPath, mappingEntries);
 
     const knownPageUrls = new Map<string, string>();
     for (const doc of documents) {
@@ -95,6 +100,7 @@ async function run(): Promise<void> {
 
     const changedFiles: string[] = [];
     const syncedPages: SyncedPage[] = [];
+    let mappingDirty = false;
 
     for (const doc of documents) {
       try {
@@ -136,20 +142,20 @@ async function run(): Promise<void> {
           await appendBlocksSafe(notion, pageId, blocks, (msg) =>
             core.warning(`[${doc.relPath}] ${msg}`),
           );
-
-          const updatedContent = upsertFrontMatter(
-            doc.rawContent,
-            "notion_page_id",
-            toDashedId(pageId),
-          );
-          if (updatedContent !== doc.rawContent) {
-            await fs.writeFile(doc.absPath, updatedContent, "utf8");
-            changedFiles.push(path.relative(workspaceRoot, doc.absPath));
-          }
         }
 
         if (pageId && pageUrl) {
           knownPageUrls.set(doc.absPath, pageUrl);
+          const mappingKey = normalizeMappingKey(doc.relPath);
+          const normalizedId = normalizeNotionId(pageId);
+          const existing = mappingEntries.get(mappingKey);
+          if (!existing || normalizeNotionId(existing.pageId) !== normalizedId) {
+            mappingEntries.set(mappingKey, { pageId: normalizedId, title: effectiveTitle });
+            mappingDirty = true;
+          } else if (existing.title !== effectiveTitle) {
+            mappingEntries.set(mappingKey, { pageId: normalizedId, title: effectiveTitle });
+            mappingDirty = true;
+          }
           syncedPages.push({
             pageId,
             title: effectiveTitle,
@@ -165,8 +171,19 @@ async function run(): Promise<void> {
       await appendPageLinksAfterAnchor(notion, indexParentPageId, indexBlockId, syncedPages);
     }
 
+    if (mappingDirty) {
+      await writeMappingFile(mappingFilePath, mappingEntries);
+      changedFiles.push(path.relative(workspaceRoot, mappingFilePath));
+    }
+
     if (changedFiles.length > 0) {
-      await persistNotionIds(changedFiles, githubToken, commitStrategy, workspaceRoot);
+      await persistNotionIds(
+        changedFiles,
+        githubToken,
+        commitStrategy,
+        workspaceRoot,
+        prBranchPrefix,
+      );
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -213,6 +230,146 @@ function normalizeTitlePrefixSeparator(value: string): string {
   return trimmed;
 }
 
+function normalizePrBranchPrefix(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "auto-notion-sync/";
+  }
+  return trimmed.endsWith("/") ? trimmed : `${trimmed}/`;
+}
+
+function resolveMappingFilePath(
+  docsFolderPath: string,
+  workspaceRoot: string,
+  input: string,
+): string {
+  const trimmed = input.trim();
+  if (!trimmed) {
+    return path.join(docsFolderPath, "_notion_links.md");
+  }
+  if (path.isAbsolute(trimmed)) {
+    return trimmed;
+  }
+  return path.resolve(workspaceRoot, trimmed);
+}
+
+function normalizeMappingKey(relPath: string): string {
+  return relPath.replace(/\\/g, "/");
+}
+
+async function readMappingFile(mappingFilePath: string): Promise<Map<string, MappingEntry>> {
+  try {
+    const content = await fs.readFile(mappingFilePath, "utf8");
+    const parsed = parseMappingTable(content);
+    if (!parsed) {
+      return new Map();
+    }
+    const { header, rows } = parsed;
+    const headerMap = header.map((value) => value.trim().toLowerCase());
+    const pathIndex = headerMap.findIndex((value) => ["path", "file", "markdown"].includes(value));
+    const idIndex = headerMap.findIndex((value) =>
+      ["notion_page_id", "notion_page", "notion_id"].includes(value),
+    );
+    const titleIndex = headerMap.findIndex((value) => value === "title");
+    if (pathIndex === -1 || idIndex === -1) {
+      return new Map();
+    }
+    const entries = new Map<string, MappingEntry>();
+    for (const row of rows) {
+      const rawPath = row[pathIndex]?.trim();
+      const rawId = row[idIndex]?.trim();
+      if (!rawPath || !rawId) {
+        continue;
+      }
+      try {
+        const normalizedPath = normalizeMappingKey(rawPath);
+        const normalizedId = normalizeNotionId(rawId);
+        const title = titleIndex >= 0 ? row[titleIndex]?.trim() : undefined;
+        entries.set(normalizedPath, { pageId: normalizedId, title });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        core.warning(`Invalid notion_page_id in mapping file for ${rawPath}: ${message}`);
+      }
+    }
+    return entries;
+  } catch (error) {
+    const err = error as { code?: string };
+    if (err.code === "ENOENT") {
+      return new Map();
+    }
+    throw error;
+  }
+}
+
+async function writeMappingFile(
+  mappingFilePath: string,
+  entries: Map<string, MappingEntry>,
+): Promise<void> {
+  const lines = buildMappingTable(entries);
+  await fs.writeFile(mappingFilePath, lines, "utf8");
+}
+
+function parseMappingTable(content: string): { header: string[]; rows: string[][] } | null {
+  const lines = content.split(/\r?\n/);
+  for (let i = 0; i < lines.length - 1; i += 1) {
+    const headerLine = lines[i];
+    if (!headerLine.includes("|")) {
+      continue;
+    }
+    const header = splitTableRow(headerLine);
+    if (!header.some((cell) => cell.trim().toLowerCase() === "notion_page_id")) {
+      continue;
+    }
+    const separatorLine = lines[i + 1] ?? "";
+    if (!isSeparatorRow(separatorLine)) {
+      continue;
+    }
+    const rows: string[][] = [];
+    for (let j = i + 2; j < lines.length; j += 1) {
+      const line = lines[j];
+      if (!line.includes("|")) {
+        break;
+      }
+      const row = splitTableRow(line);
+      if (row.length === 0) {
+        break;
+      }
+      rows.push(row);
+    }
+    return { header, rows };
+  }
+  return null;
+}
+
+function splitTableRow(line: string): string[] {
+  let trimmed = line.trim();
+  if (trimmed.startsWith("|")) {
+    trimmed = trimmed.slice(1);
+  }
+  if (trimmed.endsWith("|")) {
+    trimmed = trimmed.slice(0, -1);
+  }
+  return trimmed.split("|").map((cell) => cell.trim());
+}
+
+function isSeparatorRow(line: string): boolean {
+  if (!line.includes("|")) {
+    return false;
+  }
+  const stripped = line.replace(/[\s|\-:]/g, "");
+  return stripped.length === 0;
+}
+
+function buildMappingTable(entries: Map<string, MappingEntry>): string {
+  const rows = Array.from(entries.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+  const lines = ["| path | notion_page_id | title |", "| --- | --- | --- |"];
+  for (const [relPath, entry] of rows) {
+    const title = entry.title ?? "";
+    lines.push(`| ${relPath} | ${toDashedId(entry.pageId)} | ${title} |`);
+  }
+  return `${lines.join("\n")}\n`;
+}
+
 function normalizeCommitStrategy(value: string): CommitStrategy {
   const normalized = value.trim().toLowerCase();
   if (!normalized || normalized === "push") {
@@ -232,7 +389,7 @@ async function ensureDirectoryExists(dirPath: string): Promise<void> {
   }
 }
 
-async function collectMarkdownFiles(dirPath: string): Promise<string[]> {
+async function collectMarkdownFiles(dirPath: string, mappingFilePath: string): Promise<string[]> {
   const entries = await fs.readdir(dirPath, { withFileTypes: true });
   const files: string[] = [];
   for (const entry of entries) {
@@ -241,15 +398,22 @@ async function collectMarkdownFiles(dirPath: string): Promise<string[]> {
       if (entry.name === "node_modules" || entry.name.startsWith(".")) {
         continue;
       }
-      files.push(...(await collectMarkdownFiles(fullPath)));
+      files.push(...(await collectMarkdownFiles(fullPath, mappingFilePath)));
     } else if (entry.isFile() && entry.name.toLowerCase().endsWith(".md")) {
+      if (path.resolve(fullPath) === path.resolve(mappingFilePath)) {
+        continue;
+      }
       files.push(fullPath);
     }
   }
   return files;
 }
 
-async function loadDocuments(markdownFiles: string[], docsRoot: string): Promise<DocEntry[]> {
+async function loadDocuments(
+  markdownFiles: string[],
+  docsRoot: string,
+  mapping: Map<string, MappingEntry>,
+): Promise<DocEntry[]> {
   const documents: DocEntry[] = [];
   for (const filePath of markdownFiles) {
     const rawContent = await fs.readFile(filePath, "utf8");
@@ -257,8 +421,12 @@ async function loadDocuments(markdownFiles: string[], docsRoot: string): Promise
     const attributes = parsed.attributes || {};
     const body = parsed.body || "";
 
+    const relPath = normalizeMappingKey(path.relative(docsRoot, filePath));
     let notionPageId: string | undefined;
-    if (
+    const mapped = mapping.get(relPath);
+    if (mapped?.pageId) {
+      notionPageId = normalizeNotionId(mapped.pageId);
+    } else if (
       typeof attributes.notion_page_id === "string" &&
       attributes.notion_page_id.trim().length > 0
     ) {
@@ -276,7 +444,7 @@ async function loadDocuments(markdownFiles: string[], docsRoot: string): Promise
 
     documents.push({
       absPath: filePath,
-      relPath: path.relative(docsRoot, filePath),
+      relPath: relPath,
       rawContent,
       body,
       attributes,
@@ -428,6 +596,7 @@ async function persistNotionIds(
   githubToken: string,
   commitStrategy: CommitStrategy,
   workspaceRoot: string,
+  prBranchPrefix: string,
 ): Promise<void> {
   const commitMessage = "chore: store notion page ids";
 
@@ -458,18 +627,21 @@ async function persistNotionIds(
   }
 
   const baseBranch = process.env.GITHUB_REF_NAME || (await getCurrentBranch(workspaceRoot));
-  const shortSha = await getShortSha(workspaceRoot);
-  const runId = process.env.GITHUB_RUN_ID || Date.now().toString();
-  const branchName = `notion-sync/${baseBranch}-${shortSha}-${runId}`;
+  const branchName = `${prBranchPrefix}${baseBranch}`;
 
-  await commitAndPushToBranch(
+  const pushed = await commitAndPushToBranch(
     changedFiles,
     commitMessage,
     githubToken,
     branchName,
     (message) => core.info(message),
     workspaceRoot,
+    true,
   );
+  if (!pushed) {
+    core.info("No git changes to commit. Skipping PR update.");
+    return;
+  }
 
   const octokit = github.getOctokit(githubToken);
   const existing = await octokit.rest.pulls.list({
@@ -683,41 +855,4 @@ function chunkArray<T>(items: T[], size: number): T[][] {
 function toNotionBlockRequests(blocks: NotionBlock[]): AppendChildren {
   return blocks as unknown as AppendChildren;
 }
-
-function upsertFrontMatter(content: string, key: string, value: string): string {
-  const lines = content.split(/\r?\n/);
-  if (lines[0] !== "---") {
-    return [`---`, `${key}: ${value}`, `---`, "", ...lines].join("\n");
-  }
-
-  let endIndex = -1;
-  for (let i = 1; i < lines.length; i += 1) {
-    if (lines[i].trim() === "---") {
-      endIndex = i;
-      break;
-    }
-  }
-
-  if (endIndex === -1) {
-    return [`---`, `${key}: ${value}`, `---`, "", ...lines].join("\n");
-  }
-
-  const frontMatterLines = lines.slice(1, endIndex);
-  let updated = false;
-  const updatedLines = frontMatterLines.map((line) => {
-    const trimmed = line.trim();
-    if (trimmed.startsWith(`${key}:`)) {
-      updated = true;
-      return `${key}: ${value}`;
-    }
-    return line;
-  });
-
-  if (!updated) {
-    updatedLines.push(`${key}: ${value}`);
-  }
-
-  return ["---", ...updatedLines, "---", ...lines.slice(endIndex + 1)].join("\n");
-}
-
 run();

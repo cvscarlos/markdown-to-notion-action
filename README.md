@@ -5,8 +5,8 @@ Sync a folder of Markdown files to Notion pages and optionally maintain an index
 This action:
 
 - Creates or updates one Notion page per Markdown file.
-- Writes back the `notion_page_id` into each file’s frontmatter (so future runs update instead of creating duplicates).
-- Updates a specific index block with links to all synced pages (optional).
+- Stores `notion_page_id` mappings in a separate markdown table file (default: `_notion_links.md`).
+- Adds optional shortcut links after an anchor block (optional).
 - Validates links to avoid Notion "Invalid URL" errors.
 
 ## Quick Start (Beginner)
@@ -63,6 +63,8 @@ jobs:
           title_prefix_separator: "→"
           # Optional: pr (default), push, or none
           commit_strategy: pr
+          # Optional: prefix for the PR branch (default: auto-notion-sync/)
+          pr_branch_prefix: "auto-notion-sync/"
           github_token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
@@ -101,6 +103,8 @@ jobs:
           title_prefix_separator: "→"
           # Optional: pr (default), push, or none
           commit_strategy: pr
+          # Optional: prefix for the PR branch (default: auto-notion-sync/)
+          pr_branch_prefix: "auto-notion-sync/"
           github_token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
@@ -110,10 +114,12 @@ jobs:
 | ------------------------ | -------- | ----------------------------------------------------------------------------------------------------------------- |
 | `notion_token`           | Yes      | Notion Integration Secret.                                                                                        |
 | `docs_folder`            | Yes      | Folder containing Markdown files (relative to the repository root).                                               |
+| `notion_mapping_file`    | No       | Markdown file that stores page mappings. Default: `<docs_folder>/_notion_links.md`.                               |
 | `index_block_id`         | No       | Anchor block ID/URL. The action appends shortcut (`link_to_page`) blocks after this block.                        |
 | `parent_page_id`         | No       | Parent page ID/URL for new pages. Pages are created at the end of the parent page (Notion API limitation).        |
 | `title_prefix_separator` | No       | Separator used between folder names and the title. Default: `→`.                                                  |
 | `commit_strategy`        | No       | How to persist `notion_page_id` updates: `pr` (default), `push`, or `none`.                                       |
+| `pr_branch_prefix`       | No       | Prefix for the PR branch when `commit_strategy=pr`. Default: `auto-notion-sync/`.                                 |
 | `github_token`           | No       | Required when `commit_strategy` is `push` or `pr`. Used to push commits or open PRs for `notion_page_id` updates. |
 
 **Requirement:** You must provide either `index_block_id` **or** `parent_page_id`.
@@ -124,8 +130,19 @@ jobs:
 
 Each `.md` file is parsed for frontmatter:
 
-- If `notion_page_id` exists → the page is updated.
-- If missing → a new Notion page is created and the ID is written back to the file.
+- If `notion_page_id` exists (in the mapping file or frontmatter) → the page is updated.
+- If missing → a new Notion page is created and the mapping file is updated.
+
+**Mapping file:** Instead of writing `notion_page_id` into each Markdown file, the action stores mappings in a separate markdown table (default: `_notion_links.md`). This avoids modifying your docs content.
+
+Example mapping file:
+
+```markdown
+| path                               | notion_page_id                       | title                                                  |
+| ---------------------------------- | ------------------------------------ | ------------------------------------------------------ |
+| ACCEPTED_ARTICLES_FOR_CLOSEBYID.md | 305c37dc-b4c4-810f-bd05-d6875e33843c | `acceptedArticles`: Implementation Guide               |
+| SHOPIFY/TAGS.md                    | 305c37dc-b4c4-81b0-abe6-f6c06d55669d | SHOPIFY → parcelLab Retain: Shopify Tags Documentation |
+```
 
 ### 2) Title Selection
 
@@ -176,7 +193,6 @@ If new pages are created, the action persists updated Markdown files back to the
 ```yaml
 ---
 title: Getting Started
-notion_page_id: 01234567-89ab-cdef-0123-456789abcdef
 ---
 # Getting Started
 
@@ -208,7 +224,7 @@ To get a block ID:
 
 ### "Invalid URL for link"
 
-This action validates links and drops invalid/relative URLs instead of crashing. If you want relative links to resolve to Notion pages, make sure those files have already been synced so their `notion_page_id` exists.
+This action validates links and drops invalid/relative URLs instead of crashing. If you want relative links to resolve to Notion pages, make sure those files have already been synced so their `notion_page_id` exists in the mapping file.
 
 ### "Either index_block_id or parent_page_id must be provided"
 

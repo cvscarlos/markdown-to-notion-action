@@ -54,9 +54,10 @@ export async function commitAndPushToBranch(
   branchName: string,
   logger: Logger,
   repoRoot?: string,
-): Promise<void> {
+  forceWithLease = false,
+): Promise<boolean> {
   if (filePaths.length === 0) {
-    return;
+    return false;
   }
 
   await runCommand("git", ["checkout", "-B", branchName], repoRoot);
@@ -64,7 +65,7 @@ export async function commitAndPushToBranch(
   const status = await runCommand("git", ["status", "--porcelain", "--", ...filePaths], repoRoot);
   if (status.stdout.trim().length === 0) {
     logger("No git changes to commit.");
-    return;
+    return false;
   }
 
   await runCommand(
@@ -75,7 +76,8 @@ export async function commitAndPushToBranch(
   await runCommand("git", ["config", "user.name", "github-actions[bot]"], repoRoot);
   await runCommand("git", ["commit", "-m", message], repoRoot);
 
-  await pushBranchWithToken(branchName, githubToken, logger, repoRoot);
+  await pushBranchWithToken(branchName, githubToken, logger, repoRoot, forceWithLease);
+  return true;
 }
 
 export async function getCurrentBranch(repoRoot?: string): Promise<string> {
@@ -118,6 +120,7 @@ async function pushBranchWithToken(
   githubToken: string,
   logger: Logger,
   repoRoot?: string,
+  forceWithLease = false,
 ): Promise<void> {
   if (!githubToken) {
     throw new Error("github_token is required to push changes back to the repository.");
@@ -127,14 +130,15 @@ async function pushBranchWithToken(
   const remoteUrl = remoteResult.stdout.trim();
   const pushUrl = buildAuthRemoteUrl(remoteUrl, githubToken);
 
+  const forceFlag = forceWithLease ? ["--force-with-lease"] : [];
   if (pushUrl) {
-    await runCommand("git", ["push", pushUrl, `HEAD:${branchName}`], repoRoot);
+    await runCommand("git", ["push", ...forceFlag, pushUrl, `HEAD:${branchName}`], repoRoot);
     logger(`Pushed updates to ${branchName}.`);
     return;
   }
 
   logger("Falling back to pushing via origin remote without token.");
-  await runCommand("git", ["push", "origin", branchName], repoRoot);
+  await runCommand("git", ["push", ...forceFlag, "origin", branchName], repoRoot);
 }
 
 function buildAuthRemoteUrl(remoteUrl: string, githubToken: string): string | null {

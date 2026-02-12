@@ -10,6 +10,10 @@ inputs:
     description: "Path to folder containing markdown files"
     required: true
 
+  notion_mapping_file:
+    description: "Path to the markdown table used to store notion_page_id mappings (default: <docs_folder>/_notion_links.md)"
+    required: false
+
   index_block_id:
     description: "Anchor block ID/URL used to insert page shortcut links after this block"
     required: false
@@ -27,6 +31,11 @@ inputs:
     description: "How to persist notion_page_id updates: 'push', 'pr' (default), or 'none'"
     required: false
     default: "pr"
+
+  pr_branch_prefix:
+    description: "Prefix for the PR branch when commit_strategy=pr"
+    required: false
+    default: "auto-notion-sync/"
 
   github_token:
     description: "GitHub token used to push commits or open PRs for notion_page_id updates"
@@ -47,8 +56,10 @@ runs:
       env:
         INPUT_NOTION_TOKEN: ${{ inputs.notion_token }}
         INPUT_DOCS_FOLDER: ${{ inputs.docs_folder }}
+        INPUT_NOTION_MAPPING_FILE: ${{ inputs.notion_mapping_file }}
         INPUT_INDEX_BLOCK_ID: ${{ inputs.index_block_id }}
         INPUT_PARENT_PAGE_ID: ${{ inputs.parent_page_id }}
         INPUT_TITLE_PREFIX_SEPARATOR: ${{ inputs.title_prefix_separator }}
         INPUT_COMMIT_STRATEGY: ${{ inputs.commit_strategy }}
+        INPUT_PR_BRANCH_PREFIX: ${{ inputs.pr_branch_prefix }}
         INPUT_GITHUB_TOKEN: ${{ inputs.github_token }}
