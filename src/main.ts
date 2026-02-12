@@ -365,7 +365,9 @@ function buildMappingTable(entries: Map<string, MappingEntry>): string {
   const lines = ["| path | notion_page_id | title |", "| --- | --- | --- |"];
   for (const [relPath, entry] of rows) {
     const title = entry.title ?? "";
-    lines.push(`| ${relPath} | ${toDashedId(entry.pageId)} | ${title} |`);
+    const pageUrl = notionPageUrl(entry.pageId);
+    const linkedTitle = title ? `[${title}](${pageUrl})` : pageUrl;
+    lines.push(`| ${relPath} | ${toDashedId(entry.pageId)} | ${linkedTitle} |`);
   }
   return `${lines.join("\n")}\n`;
 }
@@ -661,7 +663,7 @@ async function persistNotionIds(
     repo,
     head: branchName,
     base: baseBranch,
-    title: "docs: store notion page ids",
+    title: "docs: store notion page ids [auto generated]",
     body: "Automated update of notion_page_id frontmatter for synced docs.",
   });
 
