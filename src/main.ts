@@ -511,7 +511,10 @@ function notionPageUrl(id: string): string {
 async function resolveParentPageId(notion: Client, blockId: string): Promise<string> {
   let currentBlockId = toDashedId(blockId);
   for (let depth = 0; depth < 10; depth += 1) {
-    const block = await notion.blocks.retrieve({ block_id: currentBlockId });
+    const block = await notionRequest(
+      () => notion.blocks.retrieve({ block_id: currentBlockId }),
+      `blocks.retrieve ${currentBlockId}`,
+    );
     if (!("parent" in block)) {
       throw new Error("Unable to resolve parent for index block.");
     }
@@ -533,10 +536,14 @@ async function createPage(
   parentPageId: string,
   title: string,
 ): Promise<{ id: string; url?: string | null }> {
-  const response = await notion.pages.create({
-    parent: { page_id: toDashedId(parentPageId) },
-    properties: buildTitleProperty(title),
-  });
+  const response = await notionRequest(
+    () =>
+      notion.pages.create({
+        parent: { page_id: toDashedId(parentPageId) },
+        properties: buildTitleProperty(title),
+      }),
+    `pages.create ${parentPageId}`,
+  );
   return {
     id: response.id,
     url: "url" in response ? response.url : null,
@@ -549,10 +556,14 @@ async function updatePageContent(
   title: string,
   blocks: NotionBlock[],
 ): Promise<void> {
-  await notion.pages.update({
-    page_id: toDashedId(pageId),
-    properties: buildTitleProperty(title),
-  });
+  await notionRequest(
+    () =>
+      notion.pages.update({
+        page_id: toDashedId(pageId),
+        properties: buildTitleProperty(title),
+      }),
+    `pages.update ${pageId}`,
+  );
   await clearChildren(notion, pageId);
   await appendBlocksSafe(notion, pageId, blocks, (msg) => core.warning(msg));
 }
@@ -674,7 +685,10 @@ async function clearChildren(notion: Client, blockId: string): Promise<void> {
   const children = await listAllChildren(notion, blockId);
   for (const child of children) {
     try {
-      await notion.blocks.delete({ block_id: child.id });
+      await notionRequest(
+        () => notion.blocks.delete({ block_id: child.id }),
+        `blocks.delete ${child.id}`,
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       core.warning(`Failed to delete block ${child.id}: ${message}`);
@@ -690,11 +704,15 @@ async function listAllChildren(
   let cursor: string | undefined;
 
   do {
-    const response = await notion.blocks.children.list({
-      block_id: toDashedId(blockId),
-      start_cursor: cursor,
-      page_size: 100,
-    });
+    const response = await notionRequest(
+      () =>
+        notion.blocks.children.list({
+          block_id: toDashedId(blockId),
+          start_cursor: cursor,
+          page_size: 100,
+        }),
+      `blocks.children.list ${blockId}`,
+    );
     results.push(...response.results);
     cursor = response.has_more ? response.next_cursor || undefined : undefined;
   } while (cursor);
@@ -716,19 +734,27 @@ async function appendBlocksSafe(
   for (const chunk of chunks) {
     const requestChunk = toNotionBlockRequests(chunk);
     try {
-      await notion.blocks.children.append({
-        block_id: toDashedId(blockId),
-        children: requestChunk,
-      });
+      await notionRequest(
+        () =>
+          notion.blocks.children.append({
+            block_id: toDashedId(blockId),
+            children: requestChunk,
+          }),
+        `blocks.children.append ${blockId}`,
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       logger(`Chunk append failed: ${message}. Retrying block-by-block.`);
       for (const block of chunk) {
         try {
-          await notion.blocks.children.append({
-            block_id: toDashedId(blockId),
-            children: toNotionBlockRequests([block]),
-          });
+          await notionRequest(
+            () =>
+              notion.blocks.children.append({
+                block_id: toDashedId(blockId),
+                children: toNotionBlockRequests([block]),
+              }),
+            `blocks.children.append ${blockId}`,
+          );
         } catch (blockError) {
           const blockMessage =
             blockError instanceof Error ? blockError.message : String(blockError);
@@ -756,11 +782,15 @@ async function appendBlocksAfter(
   for (const chunk of chunks) {
     const requestChunk = toNotionBlockRequests(chunk);
     try {
-      const response = await notion.blocks.children.append({
-        block_id: toDashedId(parentPageId),
-        children: requestChunk,
-        after: afterBlockId,
-      });
+      const response = await notionRequest(
+        () =>
+          notion.blocks.children.append({
+            block_id: toDashedId(parentPageId),
+            children: requestChunk,
+            after: afterBlockId,
+          }),
+        `blocks.children.append ${parentPageId}`,
+      );
       const last = response.results[response.results.length - 1];
       if (last && typeof last === "object" && "id" in last) {
         afterBlockId = (last as { id: string }).id;
@@ -770,11 +800,15 @@ async function appendBlocksAfter(
       logger(`Chunk append failed: ${message}. Retrying block-by-block.`);
       for (const block of chunk) {
         try {
-          const response = await notion.blocks.children.append({
-            block_id: toDashedId(parentPageId),
-            children: toNotionBlockRequests([block]),
-            after: afterBlockId,
-          });
+          const response = await notionRequest(
+            () =>
+              notion.blocks.children.append({
+                block_id: toDashedId(parentPageId),
+                children: toNotionBlockRequests([block]),
+                after: afterBlockId,
+              }),
+            `blocks.children.append ${parentPageId}`,
+          );
           const last = response.results[response.results.length - 1];
           if (last && typeof last === "object" && "id" in last) {
             afterBlockId = (last as { id: string }).id;
@@ -857,4 +891,55 @@ function chunkArray<T>(items: T[], size: number): T[][] {
 function toNotionBlockRequests(blocks: NotionBlock[]): AppendChildren {
   return blocks as unknown as AppendChildren;
 }
+
+async function notionRequest<T>(fn: () => Promise<T>, label: string): Promise<T> {
+  const maxAttempts = 5;
+  let attempt = 0;
+  let lastError: unknown;
+  while (attempt < maxAttempts) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      if (!isRateLimitError(error)) {
+        throw error;
+      }
+      attempt += 1;
+      const delayMs = getRetryDelayMs(error, attempt);
+      core.warning(`Notion rate limited (${label}). Retrying in ${delayMs}ms.`);
+      await sleep(delayMs);
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+function isRateLimitError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const err = error as { code?: string; status?: number };
+  return err.code === "rate_limited" || err.status === 429;
+}
+
+function getRetryDelayMs(error: unknown, attempt: number): number {
+  const err = error as { body?: { retry_after?: number }; headers?: Record<string, string> };
+  const retryAfterHeader = err.headers?.["retry-after"];
+  const headerSeconds = retryAfterHeader ? Number.parseFloat(retryAfterHeader) : NaN;
+  if (!Number.isNaN(headerSeconds) && headerSeconds > 0) {
+    return Math.ceil(headerSeconds * 1000);
+  }
+  const bodySeconds = err.body?.retry_after;
+  if (typeof bodySeconds === "number" && bodySeconds > 0) {
+    return Math.ceil(bodySeconds * 1000);
+  }
+  const base = 1000;
+  const backoff = base * Math.pow(2, attempt - 1);
+  const jitter = Math.floor(Math.random() * 250);
+  return backoff + jitter;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 run();
