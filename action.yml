@@ -11,7 +11,7 @@ inputs:
     required: true
 
   index_block_id:
-    description: "Notion block ID/URL used only to locate the parent page (the block itself is not modified)"
+    description: "Anchor block ID/URL used to insert page links after this block"
     required: false
 
   parent_page_id:

@@ -33,6 +33,11 @@ type DocEntry = {
 
 type CommitStrategy = "push" | "pr" | "none";
 
+type SyncedPage = {
+  pageId: string;
+  title: string;
+};
+
 async function run(): Promise<void> {
   try {
     const notionToken = readInput("notion_token", ["NOTION_TOKEN"]);
@@ -54,10 +59,6 @@ async function run(): Promise<void> {
       throw new Error("github_token is required when commit_strategy is 'push' or 'pr'.");
     }
 
-    if (!indexBlockInput && !parentPageInput) {
-      throw new Error("Either index_block_id or parent_page_id must be provided.");
-    }
-
     core.setSecret(notionToken);
     if (githubToken) {
       core.setSecret(githubToken);
@@ -70,9 +71,12 @@ async function run(): Promise<void> {
     await ensureDirectoryExists(docsFolderPath);
 
     const indexBlockId = indexBlockInput ? normalizeNotionId(indexBlockInput) : null;
-    const parentPageId = indexBlockId
-      ? await resolveParentPageId(notion, indexBlockId)
-      : normalizeNotionId(parentPageInput);
+    const indexParentPageId = indexBlockId ? await resolveParentPageId(notion, indexBlockId) : null;
+    const pagesParentId = parentPageInput ? normalizeNotionId(parentPageInput) : indexParentPageId;
+
+    if (!pagesParentId) {
+      throw new Error("Either index_block_id or parent_page_id must be provided.");
+    }
     const titlePrefixSeparator = normalizeTitlePrefixSeparator(titlePrefixSeparatorInput);
 
     const markdownFiles = await collectMarkdownFiles(docsFolderPath);
@@ -90,6 +94,7 @@ async function run(): Promise<void> {
     }
 
     const changedFiles: string[] = [];
+    const syncedPages: SyncedPage[] = [];
 
     for (const doc of documents) {
       try {
@@ -120,7 +125,7 @@ async function run(): Promise<void> {
         }
 
         if (!pageId) {
-          const pageParentId = parentPageId;
+          const pageParentId = pagesParentId;
           const created = await createPage(notion, pageParentId, effectiveTitle);
           pageId = normalizeNotionId(created.id);
           pageUrl = created.url || notionPageUrl(pageId);
@@ -145,11 +150,19 @@ async function run(): Promise<void> {
 
         if (pageId && pageUrl) {
           knownPageUrls.set(doc.absPath, pageUrl);
+          syncedPages.push({
+            pageId,
+            title: effectiveTitle,
+          });
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         core.warning(`Failed to sync ${doc.relPath}: ${message}`);
       }
+    }
+
+    if (indexBlockId && indexParentPageId && syncedPages.length > 0) {
+      await appendPageLinksAfterAnchor(notion, indexParentPageId, indexBlockId, syncedPages);
     }
 
     if (changedFiles.length > 0) {
@@ -550,6 +563,113 @@ async function appendBlocksSafe(
       }
     }
   }
+}
+
+async function appendBlocksAfter(
+  notion: Client,
+  parentPageId: string,
+  anchorBlockId: string,
+  blocks: NotionBlock[],
+  logger: (message: string) => void,
+): Promise<void> {
+  if (blocks.length === 0) {
+    return;
+  }
+
+  const chunks = chunkArray(blocks, 50);
+  let afterBlockId = toDashedId(anchorBlockId);
+
+  for (const chunk of chunks) {
+    const requestChunk = toNotionBlockRequests(chunk);
+    try {
+      const response = await notion.blocks.children.append({
+        block_id: toDashedId(parentPageId),
+        children: requestChunk,
+        after: afterBlockId,
+      });
+      const last = response.results[response.results.length - 1];
+      if (last && typeof last === "object" && "id" in last) {
+        afterBlockId = (last as { id: string }).id;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger(`Chunk append failed: ${message}. Retrying block-by-block.`);
+      for (const block of chunk) {
+        try {
+          const response = await notion.blocks.children.append({
+            block_id: toDashedId(parentPageId),
+            children: toNotionBlockRequests([block]),
+            after: afterBlockId,
+          });
+          const last = response.results[response.results.length - 1];
+          if (last && typeof last === "object" && "id" in last) {
+            afterBlockId = (last as { id: string }).id;
+          }
+        } catch (innerError) {
+          const innerMessage =
+            innerError instanceof Error ? innerError.message : String(innerError);
+          logger(`Block append failed: ${innerMessage}`);
+        }
+      }
+    }
+  }
+}
+
+async function appendPageLinksAfterAnchor(
+  notion: Client,
+  parentPageId: string,
+  anchorBlockId: string,
+  pages: SyncedPage[],
+): Promise<void> {
+  const existingChildren = await listAllChildren(notion, parentPageId);
+  const existingPageIds = new Set<string>();
+  for (const child of existingChildren) {
+    const pageId = extractLinkedPageId(child);
+    if (pageId) {
+      existingPageIds.add(normalizeNotionId(pageId));
+    }
+  }
+
+  const blocks: NotionBlock[] = [];
+  for (const page of pages) {
+    const normalizedId = normalizeNotionId(page.pageId);
+    if (existingPageIds.has(normalizedId)) {
+      continue;
+    }
+    blocks.push({
+      type: "link_to_page",
+      link_to_page: {
+        type: "page_id",
+        page_id: toDashedId(normalizedId),
+      },
+    });
+  }
+
+  if (blocks.length === 0) {
+    core.info("Index anchor already contains all page links. Skipping append.");
+    return;
+  }
+
+  await appendBlocksAfter(notion, parentPageId, anchorBlockId, blocks, (message) =>
+    core.warning(message),
+  );
+}
+
+function extractLinkedPageId(block: PartialBlockObjectResponse): string | null {
+  if (!block || typeof block !== "object") {
+    return null;
+  }
+  const typed = block as Record<string, unknown> & { type?: string };
+  if (typed.type !== "link_to_page") {
+    return null;
+  }
+  const content = typed.link_to_page as
+    | { type?: string; page_id?: string; database_id?: string }
+    | undefined;
+  if (!content || content.type !== "page_id" || !content.page_id) {
+    return null;
+  }
+  return content.page_id;
 }
 
 function chunkArray<T>(items: T[], size: number): T[][] {

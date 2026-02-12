@@ -271,6 +271,15 @@ export type TableOfContentsBlock = {
   };
 } & NotionBlockBase;
 
+export type LinkToPageBlock = {
+  type: "link_to_page";
+  link_to_page: {
+    type: "page_id" | "database_id";
+    page_id?: string;
+    database_id?: string;
+  };
+} & NotionBlockBase;
+
 export type NotionBlock =
   | ParagraphBlock
   | HeadingBlock
@@ -286,4 +295,5 @@ export type NotionBlock =
   | ImageBlock
   | TableBlock
   | TableRowBlock
-  | TableOfContentsBlock;
+  | TableOfContentsBlock
+  | LinkToPageBlock;
