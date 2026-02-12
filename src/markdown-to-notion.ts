@@ -1,6 +1,6 @@
 import MarkdownIt from "markdown-it";
 import { markdownToBlocks } from "@tryfabric/martian";
-import type { NotionBlock, NotionRichText } from "./notion-types";
+import type { NotionBlock, NotionRichText } from "./notion-types.js";
 
 export type Logger = (message: string) => void;
 

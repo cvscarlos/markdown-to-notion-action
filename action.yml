@@ -1,5 +1,6 @@
 name: "Markdown to Notion"
 description: "Syncs Markdown files to Notion pages and updates an index block."
+
 inputs:
   notion_token:
     description: "Notion Integration Secret"

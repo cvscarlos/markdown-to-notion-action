@@ -1,19 +1,27 @@
 import * as core from "@actions/core";
 import * as github from "@actions/github";
 import { Client } from "@notionhq/client";
-import type {
-  BlockObjectRequest,
-  PartialBlockObjectResponse,
-} from "@notionhq/client/build/src/api-endpoints";
-import fm from "front-matter";
+import * as fm from "front-matter";
 import dotenv from "dotenv";
 import * as fs from "fs/promises";
 import * as path from "path";
-import { markdownToNotionBlocks, extractTitle } from "./markdown-to-notion";
-import type { NotionBlock } from "./notion-types";
-import { commitAndPush, commitAndPushToBranch, getCurrentBranch, getShortSha } from "./git-utils";
+import { markdownToNotionBlocks, extractTitle } from "./markdown-to-notion.js";
+import type { NotionBlock } from "./notion-types.js";
+import {
+  commitAndPush,
+  commitAndPushToBranch,
+  getCurrentBranch,
+  getShortSha,
+} from "./git-utils.js";
 
 dotenv.config();
+
+type AppendChildrenRequest = Parameters<Client["blocks"]["children"]["append"]>[0];
+type AppendChildren = AppendChildrenRequest["children"];
+type BlocksChildrenListResponse = Awaited<ReturnType<Client["blocks"]["children"]["list"]>>;
+type PartialBlockObjectResponse = BlocksChildrenListResponse["results"][number];
+type FrontMatterResult<T> = { attributes: T; body: string };
+type FrontMatterFn = <T>(file: string, options?: { allowUnsafe?: boolean }) => FrontMatterResult<T>;
 
 type DocEntry = {
   absPath: string;
@@ -264,7 +272,7 @@ async function loadDocuments(markdownFiles: string[], docsRoot: string): Promise
   const documents: DocEntry[] = [];
   for (const filePath of markdownFiles) {
     const rawContent = await fs.readFile(filePath, "utf8");
-    const parsed = fm<Record<string, unknown>>(rawContent);
+    const parsed = (fm.default as unknown as FrontMatterFn)<Record<string, unknown>>(rawContent);
     const attributes = parsed.attributes || {};
     const body = parsed.body || "";
 
@@ -728,8 +736,8 @@ function chunkArray<T>(items: T[], size: number): T[][] {
   return chunks;
 }
 
-function toNotionBlockRequests(blocks: NotionBlock[]): BlockObjectRequest[] {
-  return blocks as unknown as BlockObjectRequest[];
+function toNotionBlockRequests(blocks: NotionBlock[]): AppendChildren {
+  return blocks as unknown as AppendChildren;
 }
 
 function upsertFrontMatter(content: string, key: string, value: string): string {

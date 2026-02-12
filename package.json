@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "Syncs Markdown files to Notion pages and updates an index block.",
   "license": "MIT",
+  "type": "module",
   "main": "src/main.ts",
   "scripts": {
     "start": "tsx src/main.ts",
