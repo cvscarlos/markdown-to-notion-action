@@ -54,7 +54,7 @@ export async function commitAndPushToBranch(
   branchName: string,
   logger: Logger,
   repoRoot?: string,
-  forceWithLease = false,
+  force = false,
 ): Promise<boolean> {
   if (filePaths.length === 0) {
     return false;
@@ -76,7 +76,7 @@ export async function commitAndPushToBranch(
   await runCommand("git", ["config", "user.name", "github-actions[bot]"], repoRoot);
   await runCommand("git", ["commit", "-m", message], repoRoot);
 
-  await pushBranchWithToken(branchName, githubToken, logger, repoRoot, forceWithLease);
+  await pushBranchWithToken(branchName, githubToken, logger, repoRoot, force);
   return true;
 }
 
@@ -120,7 +120,7 @@ async function pushBranchWithToken(
   githubToken: string,
   logger: Logger,
   repoRoot?: string,
-  forceWithLease = false,
+  force = false,
 ): Promise<void> {
   if (!githubToken) {
     throw new Error("github_token is required to push changes back to the repository.");
@@ -130,7 +130,7 @@ async function pushBranchWithToken(
   const remoteUrl = remoteResult.stdout.trim();
   const pushUrl = buildAuthRemoteUrl(remoteUrl, githubToken);
 
-  const forceFlag = forceWithLease ? ["--force-with-lease"] : [];
+  const forceFlag = force ? ["--force"] : [];
   if (pushUrl) {
     await runCommand("git", ["push", ...forceFlag, pushUrl, `HEAD:${branchName}`], repoRoot);
     logger(`Pushed updates to ${branchName}.`);
