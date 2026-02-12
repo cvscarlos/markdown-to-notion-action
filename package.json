@@ -17,7 +17,6 @@
     "@actions/github": "^9.0.0",
     "@notionhq/client": "^5.9.0",
     "@tryfabric/martian": "^1.2.4",
-    "dotenv": "^17.2.4",
     "front-matter": "^4.0.2",
     "markdown-it": "^14.1.0",
     "tsx": "^4.19.2"

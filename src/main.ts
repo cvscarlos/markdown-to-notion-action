@@ -2,7 +2,6 @@ import * as core from "@actions/core";
 import * as github from "@actions/github";
 import { Client } from "@notionhq/client";
 import * as fm from "front-matter";
-import dotenv from "dotenv";
 import * as fs from "fs/promises";
 import * as path from "path";
 import { markdownToNotionBlocks, extractTitle } from "./markdown-to-notion.js";
@@ -13,8 +12,6 @@ import {
   getCurrentBranch,
   getShortSha,
 } from "./git-utils.js";
-
-dotenv.config();
 
 type AppendChildrenRequest = Parameters<Client["blocks"]["children"]["append"]>[0];
 type AppendChildren = AppendChildrenRequest["children"];
@@ -51,6 +48,9 @@ async function run(): Promise<void> {
     const indexBlockInput = readInput("index_block_id", ["INDEX_BLOCK_ID"]);
     const parentPageInput = readInput("parent_page_id", ["PARENT_PAGE_ID"]);
     const folderStrategyInput = readInput("folder_strategy", ["FOLDER_STRATEGY"]);
+    const titlePrefixSeparatorInput = readInput("title_prefix_separator", [
+      "TITLE_PREFIX_SEPARATOR",
+    ]);
     const commitStrategyInput = readInput("commit_strategy", ["COMMIT_STRATEGY"]);
     const githubToken = readInput("github_token", ["GITHUB_TOKEN"]);
     const commitStrategy = normalizeCommitStrategy(commitStrategyInput);
@@ -83,6 +83,7 @@ async function run(): Promise<void> {
       ? await resolveParentPageId(notion, indexBlockId)
       : normalizeNotionId(parentPageInput);
     const folderStrategy = normalizeFolderStrategy(folderStrategyInput);
+    const titlePrefixSeparator = normalizeTitlePrefixSeparator(titlePrefixSeparatorInput);
 
     const markdownFiles = await collectMarkdownFiles(docsFolderPath);
     if (markdownFiles.length === 0) {
@@ -113,7 +114,7 @@ async function run(): Promise<void> {
           logger: (message) => core.info(`[${doc.relPath}] ${message}`),
         });
 
-        const effectiveTitle = buildTitleWithStrategy(doc, folderStrategy);
+        const effectiveTitle = buildTitleWithStrategy(doc, folderStrategy, titlePrefixSeparator);
         let pageId = doc.notionPageId;
         let pageUrl = doc.notionUrl;
         if (pageId) {
@@ -230,6 +231,14 @@ function normalizeFolderStrategy(value: string): FolderStrategy {
   }
   core.warning(`Unknown folder_strategy '${value}', defaulting to 'subpages'.`);
   return "subpages";
+}
+
+function normalizeTitlePrefixSeparator(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    return "→";
+  }
+  return trimmed;
 }
 
 function normalizeCommitStrategy(value: string): CommitStrategy {
@@ -494,7 +503,11 @@ function buildTitleProperty(title: string): PageProperties {
   } as PageProperties;
 }
 
-function buildTitleWithStrategy(doc: DocEntry, strategy: FolderStrategy): string {
+function buildTitleWithStrategy(
+  doc: DocEntry,
+  strategy: FolderStrategy,
+  separator: string,
+): string {
   const baseTitle = doc.title || "Untitled";
   if (strategy !== "title_prefix") {
     return baseTitle;
@@ -503,7 +516,9 @@ function buildTitleWithStrategy(doc: DocEntry, strategy: FolderStrategy): string
   if (!folderPath) {
     return baseTitle;
   }
-  return `${folderPath}/${baseTitle}`;
+  const normalizedSeparator = separator.trim();
+  const delim = normalizedSeparator.length > 0 ? ` ${normalizedSeparator} ` : " ";
+  return `${folderPath.replace(/\//g, delim)}${delim}${baseTitle}`;
 }
 
 function normalizeFolderPath(relPath: string): string {

@@ -60,6 +60,8 @@ jobs:
           index_block_id: ${{ secrets.NOTION_INDEX_BLOCK_ID }}
           # Optional: subpages (default) or title_prefix
           folder_strategy: subpages
+          # Optional: separator used when folder_strategy=title_prefix (default: →)
+          title_prefix_separator: "→"
           # Optional: pr (default), push, or none
           commit_strategy: pr
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -97,6 +99,8 @@ jobs:
           parent_page_id: ${{ secrets.NOTION_PARENT_PAGE_ID }}
           # Optional: subpages (default) or title_prefix
           folder_strategy: subpages
+          # Optional: separator used when folder_strategy=title_prefix (default: →)
+          title_prefix_separator: "→"
           # Optional: pr (default), push, or none
           commit_strategy: pr
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -111,6 +115,7 @@ jobs:
 | `index_block_id`  | No       | Block ID/URL for the index list container. If provided, the index block is cleared and rebuilt every run.                    |
 | `parent_page_id`  | No       | Parent page ID/URL for new pages (used when `index_block_id` is not provided).                                               |
 | `folder_strategy` | No       | How to represent subfolders: `subpages` (default) creates nested pages; `title_prefix` prefixes titles with the folder path. |
+| `title_prefix_separator` | No | Separator for folder paths when using `title_prefix`. Default: `→`.                                                         |
 | `commit_strategy` | No       | How to persist `notion_page_id` updates: `pr` (default), `push`, or `none`.                                                  |
 | `github_token`    | No       | Required when `commit_strategy` is `push` or `pr`. Used to push commits or open PRs for `notion_page_id` updates.            |
 
@@ -149,7 +154,7 @@ Supported conversions include:
 **Folder strategy:**
 
 - `subpages` (default): `docs/shopify/overview.md` becomes a page under a `shopify` subpage.
-- `title_prefix`: `docs/shopify/overview.md` becomes a page titled `shopify/Overview`.
+- `title_prefix`: `docs/shopify/overview.md` becomes a page titled `shopify → Overview` (separator configurable).
 
 **Safety rules:**
 
@@ -198,33 +203,6 @@ Example formats:
 To get a block ID:
 
 - In Notion, click **Copy Link to Block**.
-
-## Local Development
-
-Use Node 20 (see `.nvmrc`).
-
-1. Install dependencies:
-
-```bash
-npm install
-```
-
-2. Create a `.env` file:
-
-```env
-NOTION_TOKEN=secret_xxx
-DOCS_FOLDER=docs
-INDEX_BLOCK_ID=your_block_or_url
-PARENT_PAGE_ID=your_page_or_url
-# Required when commit_strategy=push or pr
-GITHUB_TOKEN=ghp_xxx
-```
-
-3. Run:
-
-```bash
-npm start
-```
 
 ### Useful Scripts
 
