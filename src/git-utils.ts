@@ -1,4 +1,5 @@
 import { execFile } from "child_process";
+import * as path from "path";
 import { promisify } from "util";
 
 const execFileAsync = promisify(execFile);
@@ -90,6 +91,24 @@ export async function getShortSha(repoRoot?: string): Promise<string> {
   return shaResult.stdout.trim();
 }
 
+export async function getLastCommitTime(filePath: string, repoRoot?: string): Promise<Date | null> {
+  const gitPath = resolveGitPath(filePath, repoRoot);
+  try {
+    const result = await runCommand("git", ["log", "-1", "--format=%cI", "--", gitPath], repoRoot);
+    const trimmed = result.stdout.trim();
+    if (!trimmed) {
+      return null;
+    }
+    const parsed = new Date(trimmed);
+    if (Number.isNaN(parsed.getTime())) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 async function pushWithToken(
   githubToken: string,
   logger: Logger,
@@ -153,4 +172,13 @@ function buildAuthRemoteUrl(remoteUrl: string, githubToken: string): string | nu
   }
 
   return null;
+}
+
+function resolveGitPath(filePath: string, repoRoot?: string): string {
+  const root = repoRoot ?? process.cwd();
+  const relative = path.relative(root, filePath);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    return filePath;
+  }
+  return relative;
 }

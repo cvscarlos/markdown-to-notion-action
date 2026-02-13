@@ -10,7 +10,8 @@
     "lint": "eslint . --ext .ts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "precommit": "npm run format && npm run typecheck && npm run lint"
   },
   "dependencies": {
     "@actions/core": "^3.0.0",

@@ -6,12 +6,20 @@ import * as fs from "fs/promises";
 import * as path from "path";
 import { markdownToNotionBlocks, extractTitle } from "./markdown-to-notion.js";
 import type { NotionBlock } from "./notion-types.js";
-import { commitAndPush, commitAndPushToBranch, getCurrentBranch } from "./git-utils.js";
+import {
+  commitAndPush,
+  commitAndPushToBranch,
+  getCurrentBranch,
+  getLastCommitTime,
+} from "./git-utils.js";
 
 type AppendChildrenRequest = Parameters<Client["blocks"]["children"]["append"]>[0];
 type AppendChildren = AppendChildrenRequest["children"];
 type BlocksChildrenListResponse = Awaited<ReturnType<Client["blocks"]["children"]["list"]>>;
 type PartialBlockObjectResponse = BlocksChildrenListResponse["results"][number];
+type BlockUpdateRequest = Parameters<Client["blocks"]["update"]>[0];
+type CalloutUpdateRequest = Extract<BlockUpdateRequest, { callout: unknown }>;
+type CalloutIconRequest = CalloutUpdateRequest["callout"] extends { icon?: infer T } ? T : never;
 type FrontMatterResult<T> = { attributes: T; body: string };
 type FrontMatterFn = <T>(file: string, options?: { allowUnsafe?: boolean }) => FrontMatterResult<T>;
 
@@ -105,32 +113,44 @@ async function run(): Promise<void> {
     for (const doc of documents) {
       try {
         core.info(`[${doc.relPath}] Sync start: ${doc.title}`);
-        const resolveLink = (href: string) =>
-          resolveRelativeLink(href, doc.absPath, docsFolderPath, knownPageUrls);
-
-        const blocks = markdownToNotionBlocks(doc.body, {
-          resolveLink,
-          logger: (message) => core.info(`[${doc.relPath}] ${message}`),
-        });
-
         const effectiveTitle = buildTitleWithSeparator(doc, titlePrefixSeparator);
         let pageId = doc.notionPageId;
         let pageUrl = doc.notionUrl;
+        let didSync = false;
         if (pageId) {
-          try {
-            await updatePageContent(notion, pageId, effectiveTitle, blocks);
-            pageUrl = notionPageUrl(pageId);
-            core.info(`[${doc.relPath}] Updated page: ${effectiveTitle}`);
-          } catch (error) {
-            if (!isNotionNotFoundError(error)) {
-              throw error;
+          const skipSync = await shouldSkipSync(notion, pageId, doc.absPath, workspaceRoot);
+          if (skipSync) {
+            core.info(`[${doc.relPath}] Skipping sync: Notion is up to date.`);
+            pageUrl = pageUrl ?? notionPageUrl(pageId);
+          } else {
+            const resolveLink = (href: string) =>
+              resolveRelativeLink(href, doc.absPath, docsFolderPath, knownPageUrls);
+            const blocks = markdownToNotionBlocks(doc.body, {
+              resolveLink,
+              logger: (message) => core.info(`[${doc.relPath}] ${message}`),
+            });
+            try {
+              await updatePageContent(notion, pageId, effectiveTitle, blocks);
+              pageUrl = notionPageUrl(pageId);
+              didSync = true;
+              core.info(`[${doc.relPath}] Updated page: ${effectiveTitle}`);
+            } catch (error) {
+              if (!isNotionNotFoundError(error)) {
+                throw error;
+              }
+              core.warning(`[${doc.relPath}] Notion page missing, recreating: ${effectiveTitle}`);
+              pageId = undefined;
             }
-            core.warning(`[${doc.relPath}] Notion page missing, recreating: ${effectiveTitle}`);
-            pageId = undefined;
           }
         }
 
         if (!pageId) {
+          const resolveLink = (href: string) =>
+            resolveRelativeLink(href, doc.absPath, docsFolderPath, knownPageUrls);
+          const blocks = markdownToNotionBlocks(doc.body, {
+            resolveLink,
+            logger: (message) => core.info(`[${doc.relPath}] ${message}`),
+          });
           const pageParentId = pagesParentId;
           const created = await createPage(notion, pageParentId, effectiveTitle);
           pageId = normalizeNotionId(created.id);
@@ -142,6 +162,7 @@ async function run(): Promise<void> {
           await appendBlocksSafe(notion, pageId, blocks, (msg) =>
             core.warning(`[${doc.relPath}] ${msg}`),
           );
+          didSync = true;
         }
 
         if (pageId && pageUrl) {
@@ -150,9 +171,12 @@ async function run(): Promise<void> {
           const normalizedId = normalizeNotionId(pageId);
           const existing = mappingEntries.get(mappingKey);
           if (!existing || normalizeNotionId(existing.pageId) !== normalizedId) {
-            mappingEntries.set(mappingKey, { pageId: normalizedId, title: effectiveTitle });
+            mappingEntries.set(mappingKey, {
+              pageId: normalizedId,
+              title: didSync ? effectiveTitle : (existing?.title ?? effectiveTitle),
+            });
             mappingDirty = true;
-          } else if (existing.title !== effectiveTitle) {
+          } else if (didSync && existing.title !== effectiveTitle) {
             mappingEntries.set(mappingKey, { pageId: normalizedId, title: effectiveTitle });
             mappingDirty = true;
           }
@@ -511,6 +535,10 @@ function notionPageUrl(id: string): string {
 async function resolveParentPageId(notion: Client, blockId: string): Promise<string> {
   let currentBlockId = toDashedId(blockId);
   for (let depth = 0; depth < 10; depth += 1) {
+    /**
+     * Notion API: Retrieve a block
+     * https://developers.notion.com/reference/retrieve-a-block.md
+     */
     const block = await notionRequest(
       () => notion.blocks.retrieve({ block_id: currentBlockId }),
       `blocks.retrieve ${currentBlockId}`,
@@ -536,6 +564,10 @@ async function createPage(
   parentPageId: string,
   title: string,
 ): Promise<{ id: string; url?: string | null }> {
+  /**
+   * Notion API: Create a page
+   * https://developers.notion.com/reference/post-page.md
+   */
   const response = await notionRequest(
     () =>
       notion.pages.create({
@@ -556,6 +588,11 @@ async function updatePageContent(
   title: string,
   blocks: NotionBlock[],
 ): Promise<void> {
+  core.info(`Updating page metadata for ${pageId}...`);
+  /**
+   * Notion API: Update page properties
+   * https://developers.notion.com/reference/patch-page.md
+   */
   await notionRequest(
     () =>
       notion.pages.update({
@@ -564,8 +601,42 @@ async function updatePageContent(
       }),
     `pages.update ${pageId}`,
   );
-  await clearChildren(notion, pageId);
-  await appendBlocksSafe(notion, pageId, blocks, (msg) => core.warning(msg));
+  core.info(`Starting block sync for ${pageId}...`);
+  await syncPageBlocks(notion, pageId, blocks);
+}
+
+const NOTION_SYNC_BUFFER_MS = 60_000;
+
+async function shouldSkipSync(
+  notion: Client,
+  pageId: string,
+  filePath: string,
+  workspaceRoot: string,
+): Promise<boolean> {
+  const lastCommitTime = await getLastCommitTime(filePath, workspaceRoot);
+  if (!lastCommitTime) {
+    core.warning(`Unable to read git commit time for ${filePath}. Syncing.`);
+    return false;
+  }
+
+  /**
+   * Notion API: Retrieve a page
+   * https://developers.notion.com/reference/retrieve-a-page.md
+   */
+  const page = await notionRequest(
+    () => notion.pages.retrieve({ page_id: toDashedId(pageId) }),
+    `pages.retrieve ${pageId}`,
+  );
+  const lastEdited = "last_edited_time" in page ? page.last_edited_time : null;
+  if (!lastEdited) {
+    return false;
+  }
+  const notionTime = new Date(lastEdited);
+  if (Number.isNaN(notionTime.getTime())) {
+    return false;
+  }
+
+  return lastCommitTime.getTime() <= notionTime.getTime() + NOTION_SYNC_BUFFER_MS;
 }
 
 type CreatePageRequest = Parameters<Client["pages"]["create"]>[0];
@@ -682,18 +753,52 @@ async function persistNotionIds(
 }
 
 async function clearChildren(notion: Client, blockId: string): Promise<void> {
+  core.info(`Starting block deletion for ${blockId}...`);
   const children = await listAllChildren(notion, blockId);
-  for (const child of children) {
-    try {
-      await notionRequest(
-        () => notion.blocks.delete({ block_id: child.id }),
-        `blocks.delete ${child.id}`,
-      );
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      core.warning(`Failed to delete block ${child.id}: ${message}`);
+  if (children.length === 0) {
+    core.info("No existing blocks to clear.");
+    return;
+  }
+
+  const concurrencyLimit = 3;
+  core.info(`Deleting ${children.length} existing blocks...`);
+
+  const chunks = chunkArray(children, concurrencyLimit);
+
+  for (const [chunkIndex, chunk] of chunks.entries()) {
+    await Promise.all(
+      chunk.map(async (child) => {
+        const blockIdValue = "id" in child ? child.id : null;
+        if (typeof blockIdValue !== "string" || blockIdValue.length === 0) {
+          core.warning("Skipping delete for block with missing id.");
+          return;
+        }
+        try {
+          /**
+           * Notion API: Delete a block
+           * https://developers.notion.com/reference/delete-a-block.md
+           */
+          await notionRequest(
+            () => notion.blocks.delete({ block_id: blockIdValue }),
+            `blocks.delete ${blockIdValue}`,
+          );
+        } catch (error) {
+          if (isNotionNotFoundError(error)) {
+            return;
+          }
+          const message = error instanceof Error ? error.message : String(error);
+          core.warning(`Failed to delete block ${blockIdValue}: ${message}`);
+        }
+      }),
+    );
+
+    if (chunkIndex % 20 === 0 && chunkIndex > 0) {
+      const deletedCount = Math.min((chunkIndex + 1) * concurrencyLimit, children.length);
+      core.info(`Deleted ${deletedCount}/${children.length} blocks...`);
     }
   }
+
+  core.info("Finished clearing page.");
 }
 
 async function listAllChildren(
@@ -704,6 +809,10 @@ async function listAllChildren(
   let cursor: string | undefined;
 
   do {
+    /**
+     * Notion API: Retrieve block children
+     * https://developers.notion.com/reference/get-block-children.md
+     */
     const response = await notionRequest(
       () =>
         notion.blocks.children.list({
@@ -720,6 +829,423 @@ async function listAllChildren(
   return results;
 }
 
+type BlockSyncStats = {
+  unchanged: number;
+  updated: number;
+  replaced: number;
+  appended: number;
+  deleted: number;
+};
+
+type BlockSyncResult = {
+  action: "unchanged" | "updated" | "replaced";
+  newBlockId?: string;
+};
+
+async function syncPageBlocks(
+  notion: Client,
+  pageId: string,
+  blocks: NotionBlock[],
+): Promise<void> {
+  if (blocks.length === 0) {
+    await clearChildren(notion, pageId);
+    return;
+  }
+
+  core.info(`Loading existing blocks for ${pageId}...`);
+  const existingChildren = await listAllChildren(notion, pageId);
+  if (existingChildren.length === 0) {
+    await appendBlocksSafe(notion, pageId, blocks, (msg) => core.warning(msg));
+    return;
+  }
+
+  core.info(`Syncing ${blocks.length} blocks with ${existingChildren.length} existing blocks.`);
+
+  const stats: BlockSyncStats = {
+    unchanged: 0,
+    updated: 0,
+    replaced: 0,
+    appended: 0,
+    deleted: 0,
+  };
+
+  const sharedCount = Math.min(existingChildren.length, blocks.length);
+  let lastBlockId: string | null = null;
+
+  for (let index = 0; index < sharedCount; index += 1) {
+    const existing = existingChildren[index];
+    const existingId = getBlockId(existing);
+    if (!existingId) {
+      core.warning("Skipping existing block with missing id.");
+      continue;
+    }
+    const incoming = blocks[index];
+    const result = await syncBlockPair(notion, pageId, existing, incoming);
+    switch (result.action) {
+      case "unchanged":
+        stats.unchanged += 1;
+        lastBlockId = existingId;
+        break;
+      case "updated":
+        stats.updated += 1;
+        lastBlockId = existingId;
+        break;
+      case "replaced":
+        stats.replaced += 1;
+        lastBlockId = result.newBlockId ?? existingId;
+        break;
+      default:
+        lastBlockId = existingId;
+        break;
+    }
+  }
+
+  if (blocks.length > existingChildren.length) {
+    const remaining = blocks.slice(sharedCount);
+    if (remaining.length > 0) {
+      if (lastBlockId) {
+        await appendBlocksAfter(notion, pageId, lastBlockId, remaining, (msg) => core.warning(msg));
+      } else {
+        await appendBlocksSafe(notion, pageId, remaining, (msg) => core.warning(msg));
+      }
+      stats.appended += remaining.length;
+    }
+  }
+
+  if (existingChildren.length > blocks.length) {
+    const remainingExisting = existingChildren.slice(sharedCount);
+    stats.deleted += await deleteBlocks(notion, remainingExisting);
+  }
+
+  core.info(
+    `Block sync complete. Unchanged: ${stats.unchanged}, updated: ${stats.updated}, replaced: ${stats.replaced}, appended: ${stats.appended}, deleted: ${stats.deleted}.`,
+  );
+}
+
+async function syncBlockPair(
+  notion: Client,
+  parentPageId: string,
+  existing: PartialBlockObjectResponse,
+  incoming: NotionBlock,
+): Promise<BlockSyncResult> {
+  const existingId = getBlockId(existing);
+  const existingType = getBlockType(existing);
+  if (!existingId || !existingType) {
+    return { action: "unchanged" };
+  }
+
+  const incomingChildren = getBlockChildren(incoming);
+  const existingHasChildren = blockHasChildrenExisting(existing);
+  const hasChildrenToSync = incomingChildren.length > 0 || existingHasChildren;
+
+  if (existingType === incoming.type) {
+    if (areBlocksEquivalent(existing, incoming)) {
+      if (hasChildrenToSync) {
+        await syncPageBlocks(notion, existingId, incomingChildren);
+        return { action: "updated" };
+      }
+      return { action: "unchanged" };
+    }
+
+    if (canUpdateBlockType(incoming.type)) {
+      const updated = await updateBlockContent(notion, existingId, incoming);
+      if (updated) {
+        if (hasChildrenToSync) {
+          await syncPageBlocks(notion, existingId, incomingChildren);
+        }
+        return { action: "updated" };
+      }
+    }
+  }
+
+  const newBlockId = await appendSingleBlockAfter(notion, parentPageId, existingId, incoming);
+  await deleteBlockSafe(notion, existingId);
+  return { action: "replaced", newBlockId };
+}
+
+function getBlockId(block: PartialBlockObjectResponse): string | null {
+  if (!block || typeof block !== "object") {
+    return null;
+  }
+  const candidate = (block as { id?: unknown }).id;
+  return typeof candidate === "string" ? candidate : null;
+}
+
+function getBlockType(block: PartialBlockObjectResponse): string | null {
+  if (!block || typeof block !== "object") {
+    return null;
+  }
+  const candidate = (block as { type?: unknown }).type;
+  return typeof candidate === "string" ? candidate : null;
+}
+
+function getBlockChildren(block: NotionBlock): NotionBlock[] {
+  const content = (block as Record<string, unknown>)[block.type];
+  if (!content || typeof content !== "object") {
+    return [];
+  }
+  const children = (content as { children?: unknown }).children;
+  return Array.isArray(children) ? (children as NotionBlock[]) : [];
+}
+
+function blockHasChildrenExisting(block: PartialBlockObjectResponse): boolean {
+  if (!block || typeof block !== "object") {
+    return false;
+  }
+  const hasChildren = (block as { has_children?: unknown }).has_children;
+  return hasChildren === true;
+}
+
+function canUpdateBlockType(type: string): boolean {
+  return [
+    "paragraph",
+    "heading_1",
+    "heading_2",
+    "heading_3",
+    "bulleted_list_item",
+    "numbered_list_item",
+    "quote",
+    "callout",
+    "toggle",
+    "to_do",
+    "code",
+    "equation",
+    "table_of_contents",
+  ].includes(type);
+}
+
+async function updateBlockContent(
+  notion: Client,
+  blockId: string,
+  block: NotionBlock,
+): Promise<boolean> {
+  const request = buildBlockUpdateRequest(blockId, block);
+  if (!request) {
+    return false;
+  }
+  try {
+    /**
+     * Notion API: Update a block
+     * https://developers.notion.com/reference/update-a-block.md
+     */
+    await notionRequest(() => notion.blocks.update(request), `blocks.update ${blockId}`);
+    return true;
+  } catch (error) {
+    if (isNotionNotFoundError(error)) {
+      throw error;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    core.warning(`Block update failed for ${blockId}: ${message}. Replacing block.`);
+    return false;
+  }
+}
+
+function buildBlockUpdateRequest(blockId: string, block: NotionBlock): BlockUpdateRequest | null {
+  const dashedId = toDashedId(blockId);
+  switch (block.type) {
+    case "paragraph": {
+      return {
+        block_id: dashedId,
+        paragraph: {
+          rich_text: block.paragraph?.rich_text ?? [],
+          color: block.paragraph?.color ?? "default",
+        },
+      };
+    }
+    case "heading_1": {
+      return {
+        block_id: dashedId,
+        heading_1: {
+          rich_text: block.heading_1?.rich_text ?? [],
+          color: block.heading_1?.color ?? "default",
+          is_toggleable: block.heading_1?.is_toggleable ?? false,
+        },
+      };
+    }
+    case "heading_2": {
+      return {
+        block_id: dashedId,
+        heading_2: {
+          rich_text: block.heading_2?.rich_text ?? [],
+          color: block.heading_2?.color ?? "default",
+          is_toggleable: block.heading_2?.is_toggleable ?? false,
+        },
+      };
+    }
+    case "heading_3": {
+      return {
+        block_id: dashedId,
+        heading_3: {
+          rich_text: block.heading_3?.rich_text ?? [],
+          color: block.heading_3?.color ?? "default",
+          is_toggleable: block.heading_3?.is_toggleable ?? false,
+        },
+      };
+    }
+    case "bulleted_list_item": {
+      return {
+        block_id: dashedId,
+        bulleted_list_item: {
+          rich_text: block.bulleted_list_item?.rich_text ?? [],
+          color: block.bulleted_list_item?.color ?? "default",
+        },
+      };
+    }
+    case "numbered_list_item": {
+      return {
+        block_id: dashedId,
+        numbered_list_item: {
+          rich_text: block.numbered_list_item?.rich_text ?? [],
+          color: block.numbered_list_item?.color ?? "default",
+        },
+      };
+    }
+    case "quote": {
+      return {
+        block_id: dashedId,
+        quote: {
+          rich_text: block.quote?.rich_text ?? [],
+          color: block.quote?.color ?? "default",
+        },
+      };
+    }
+    case "callout": {
+      const icon = toCalloutIconRequest(block.callout?.icon);
+      return {
+        block_id: dashedId,
+        callout: {
+          rich_text: block.callout?.rich_text ?? [],
+          color: block.callout?.color ?? "default",
+          ...(icon ? { icon } : {}),
+        },
+      };
+    }
+    case "toggle": {
+      return {
+        block_id: dashedId,
+        toggle: {
+          rich_text: block.toggle?.rich_text ?? [],
+          color: block.toggle?.color ?? "default",
+        },
+      };
+    }
+    case "to_do": {
+      return {
+        block_id: dashedId,
+        to_do: {
+          rich_text: block.to_do?.rich_text ?? [],
+          checked: block.to_do?.checked ?? false,
+          color: block.to_do?.color ?? "default",
+        },
+      };
+    }
+    case "code": {
+      return {
+        block_id: dashedId,
+        code: {
+          rich_text: block.code?.rich_text ?? [],
+          language: block.code?.language ?? "plain text",
+          caption: block.code?.caption ?? [],
+        },
+      };
+    }
+    case "equation": {
+      return {
+        block_id: dashedId,
+        equation: {
+          expression: block.equation?.expression ?? "",
+        },
+      };
+    }
+    case "table_of_contents": {
+      return {
+        block_id: dashedId,
+        table_of_contents: {
+          color: block.table_of_contents?.color ?? "default",
+        },
+      };
+    }
+    default:
+      return null;
+  }
+}
+
+async function appendSingleBlockAfter(
+  notion: Client,
+  parentPageId: string,
+  anchorBlockId: string,
+  block: NotionBlock,
+): Promise<string> {
+  core.info(`Starting single block creation after ${anchorBlockId}.`);
+  /**
+   * Notion API: Append block children
+   * https://developers.notion.com/reference/patch-block-children.md
+   */
+  const response = await notionRequest(
+    () =>
+      notion.blocks.children.append({
+        block_id: toDashedId(parentPageId),
+        children: toNotionBlockRequests([block]),
+        after: toDashedId(anchorBlockId),
+      }),
+    `blocks.children.append ${parentPageId}`,
+  );
+  const last = response.results[response.results.length - 1];
+  if (last && typeof last === "object" && "id" in last) {
+    return (last as { id: string }).id;
+  }
+  throw new Error("Unable to determine id for appended block.");
+}
+
+async function deleteBlocks(notion: Client, blocks: PartialBlockObjectResponse[]): Promise<number> {
+  if (blocks.length === 0) {
+    return 0;
+  }
+
+  core.info(`Starting batch delete for ${blocks.length} blocks...`);
+  const concurrencyLimit = 3;
+  const chunks = chunkArray(blocks, concurrencyLimit);
+  let deletedCount = 0;
+
+  for (const chunk of chunks) {
+    await Promise.all(
+      chunk.map(async (block) => {
+        const blockId = getBlockId(block);
+        if (!blockId) {
+          core.warning("Skipping delete for block with missing id.");
+          return;
+        }
+        await deleteBlockSafe(notion, blockId);
+      }),
+    );
+    deletedCount += chunk.length;
+    if (deletedCount % 50 === 0 || deletedCount === blocks.length) {
+      core.info(`Deleted ${deletedCount}/${blocks.length} trailing blocks...`);
+    }
+  }
+
+  return deletedCount;
+}
+
+async function deleteBlockSafe(notion: Client, blockId: string): Promise<void> {
+  try {
+    /**
+     * Notion API: Delete a block
+     * https://developers.notion.com/reference/delete-a-block.md
+     */
+    await notionRequest(
+      () => notion.blocks.delete({ block_id: blockId }),
+      `blocks.delete ${blockId}`,
+    );
+  } catch (error) {
+    if (isNotionNotFoundError(error)) {
+      return;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    core.warning(`Failed to delete block ${blockId}: ${message}`);
+  }
+}
+
 async function appendBlocksSafe(
   notion: Client,
   blockId: string,
@@ -730,10 +1256,15 @@ async function appendBlocksSafe(
     return;
   }
 
+  core.info(`Starting block creation for ${blockId} (${blocks.length} blocks).`);
   const chunks = chunkArray(blocks, 50);
   for (const chunk of chunks) {
     const requestChunk = toNotionBlockRequests(chunk);
     try {
+      /**
+       * Notion API: Append block children
+       * https://developers.notion.com/reference/patch-block-children.md
+       */
       await notionRequest(
         () =>
           notion.blocks.children.append({
@@ -747,6 +1278,10 @@ async function appendBlocksSafe(
       logger(`Chunk append failed: ${message}. Retrying block-by-block.`);
       for (const block of chunk) {
         try {
+          /**
+           * Notion API: Append block children
+           * https://developers.notion.com/reference/patch-block-children.md
+           */
           await notionRequest(
             () =>
               notion.blocks.children.append({
@@ -776,12 +1311,17 @@ async function appendBlocksAfter(
     return;
   }
 
+  core.info(`Starting block creation after ${anchorBlockId} (${blocks.length} blocks).`);
   const chunks = chunkArray(blocks, 50);
   let afterBlockId = toDashedId(anchorBlockId);
 
   for (const chunk of chunks) {
     const requestChunk = toNotionBlockRequests(chunk);
     try {
+      /**
+       * Notion API: Append block children
+       * https://developers.notion.com/reference/patch-block-children.md
+       */
       const response = await notionRequest(
         () =>
           notion.blocks.children.append({
@@ -800,6 +1340,10 @@ async function appendBlocksAfter(
       logger(`Chunk append failed: ${message}. Retrying block-by-block.`);
       for (const block of chunk) {
         try {
+          /**
+           * Notion API: Append block children
+           * https://developers.notion.com/reference/patch-block-children.md
+           */
           const response = await notionRequest(
             () =>
               notion.blocks.children.append({
@@ -829,21 +1373,41 @@ async function appendPageLinksAfterAnchor(
   anchorBlockId: string,
   pages: SyncedPage[],
 ): Promise<void> {
+  core.info(`Starting index link sync for anchor ${anchorBlockId}...`);
   const existingChildren = await listAllChildren(notion, parentPageId);
-  const existingPageIds = new Set<string>();
-  for (const child of existingChildren) {
-    const pageId = extractLinkedPageId(child);
-    if (pageId) {
-      existingPageIds.add(normalizeNotionId(pageId));
+  const anchorId = normalizeNotionId(anchorBlockId);
+  const anchorIndex = existingChildren.findIndex((child) => {
+    const childId = getBlockId(child);
+    if (!childId) {
+      return false;
     }
+    try {
+      return normalizeNotionId(childId) === anchorId;
+    } catch {
+      return false;
+    }
+  });
+  if (anchorIndex < 0) {
+    throw new Error(`Index anchor block ${anchorBlockId} not found in parent page.`);
+  }
+
+  const existingLinkBlocks: PartialBlockObjectResponse[] = [];
+  for (let i = anchorIndex + 1; i < existingChildren.length; i += 1) {
+    const child = existingChildren[i];
+    if (getBlockType(child) !== "link_to_page") {
+      break;
+    }
+    existingLinkBlocks.push(child);
   }
 
   const blocks: NotionBlock[] = [];
+  const seen = new Set<string>();
   for (const page of pages) {
     const normalizedId = normalizeNotionId(page.pageId);
-    if (existingPageIds.has(normalizedId)) {
+    if (seen.has(normalizedId)) {
       continue;
     }
+    seen.add(normalizedId);
     blocks.push({
       type: "link_to_page",
       link_to_page: {
@@ -853,8 +1417,13 @@ async function appendPageLinksAfterAnchor(
     });
   }
 
+  if (existingLinkBlocks.length > 0) {
+    core.info(`Replacing ${existingLinkBlocks.length} index link blocks.`);
+    await deleteBlocks(notion, existingLinkBlocks);
+  }
+
   if (blocks.length === 0) {
-    core.info("Index anchor already contains all page links. Skipping append.");
+    core.info("Index anchor cleared. No pages to link.");
     return;
   }
 
@@ -863,21 +1432,279 @@ async function appendPageLinksAfterAnchor(
   );
 }
 
-function extractLinkedPageId(block: PartialBlockObjectResponse): string | null {
+type NormalizedAnnotations = {
+  bold?: true;
+  italic?: true;
+  strikethrough?: true;
+  underline?: true;
+  code?: true;
+  color?: string;
+};
+
+type NormalizedRichTextItem =
+  | {
+      type: "text";
+      text: { content: string; link?: { url: string } };
+      annotations?: NormalizedAnnotations;
+    }
+  | { type: string };
+
+type NormalizedBlock = {
+  type: string;
+  content: unknown;
+};
+
+function areBlocksEquivalent(existing: PartialBlockObjectResponse, incoming: NotionBlock): boolean {
+  const normalizedExisting = normalizeBlockForCompare(existing);
+  const normalizedIncoming = normalizeBlockForCompare(incoming);
+  if (!normalizedExisting || !normalizedIncoming) {
+    return false;
+  }
+  if (normalizedExisting.type !== normalizedIncoming.type) {
+    return false;
+  }
+  return JSON.stringify(normalizedExisting.content) === JSON.stringify(normalizedIncoming.content);
+}
+
+function normalizeBlockForCompare(block: unknown): NormalizedBlock | null {
   if (!block || typeof block !== "object") {
     return null;
   }
-  const typed = block as Record<string, unknown> & { type?: string };
-  if (typed.type !== "link_to_page") {
+  const type = (block as { type?: unknown }).type;
+  if (typeof type !== "string") {
     return null;
   }
-  const content = typed.link_to_page as
-    | { type?: string; page_id?: string; database_id?: string }
-    | undefined;
-  if (!content || content.type !== "page_id" || !content.page_id) {
+  const content = (block as Record<string, unknown>)[type];
+  const normalized = normalizeBlockContent(type, content);
+  if (normalized === null) {
     return null;
   }
-  return content.page_id;
+  return { type, content: normalized };
+}
+
+function normalizeBlockContent(type: string, content: unknown): unknown | null {
+  const record = content && typeof content === "object" ? (content as Record<string, unknown>) : {};
+  switch (type) {
+    case "paragraph":
+    case "bulleted_list_item":
+    case "numbered_list_item":
+    case "quote":
+    case "toggle":
+      return {
+        rich_text: normalizeRichTextArray(record.rich_text),
+        color: normalizeColor(record.color),
+      };
+    case "heading_1":
+    case "heading_2":
+    case "heading_3":
+      return {
+        rich_text: normalizeRichTextArray(record.rich_text),
+        color: normalizeColor(record.color),
+        is_toggleable: record.is_toggleable === true,
+      };
+    case "callout":
+      return {
+        rich_text: normalizeRichTextArray(record.rich_text),
+        color: normalizeColor(record.color),
+        icon: normalizeCalloutIcon(record.icon),
+      };
+    case "to_do":
+      return {
+        rich_text: normalizeRichTextArray(record.rich_text),
+        checked: record.checked === true,
+        color: normalizeColor(record.color),
+      };
+    case "divider":
+      return {};
+    case "code":
+      return {
+        rich_text: normalizeRichTextArray(record.rich_text),
+        language: typeof record.language === "string" ? record.language : "",
+        caption: normalizeRichTextArray(record.caption),
+      };
+    case "equation":
+      return {
+        expression: typeof record.expression === "string" ? record.expression : "",
+      };
+    case "image":
+      return {
+        type: typeof record.type === "string" ? record.type : "",
+        url: extractImageUrl(record),
+        caption: normalizeRichTextArray(record.caption),
+      };
+    case "table_of_contents":
+      return {
+        color: normalizeColor(record.color),
+      };
+    case "link_to_page":
+      return {
+        type: typeof record.type === "string" ? record.type : "",
+        page_id: normalizeNotionIdValue(record.page_id),
+        database_id: normalizeNotionIdValue(record.database_id),
+      };
+    case "table":
+    case "table_row":
+      return null;
+    default:
+      return null;
+  }
+}
+
+function normalizeRichTextArray(value: unknown): NormalizedRichTextItem[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const result: NormalizedRichTextItem[] = [];
+  for (const item of value) {
+    const normalized = normalizeRichTextItem(item);
+    if (normalized) {
+      result.push(normalized);
+    }
+  }
+  return result;
+}
+
+function normalizeRichTextItem(value: unknown): NormalizedRichTextItem | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const type = typeof record.type === "string" ? record.type : null;
+  if (!type) {
+    return null;
+  }
+  if (type !== "text") {
+    return { type };
+  }
+  const text = record.text as { content?: unknown; link?: unknown } | undefined;
+  const content = text && typeof text.content === "string" ? text.content : "";
+  const link = text && typeof text.link === "object" ? (text.link as { url?: unknown }) : null;
+  const linkUrl = link && typeof link.url === "string" ? link.url : null;
+  const normalized: NormalizedRichTextItem = {
+    type: "text",
+    text: { content },
+  };
+  if (linkUrl) {
+    normalized.text.link = { url: linkUrl };
+  }
+  const annotations = normalizeAnnotations(record.annotations);
+  if (annotations) {
+    normalized.annotations = annotations;
+  }
+  return normalized;
+}
+
+function normalizeAnnotations(value: unknown): NormalizedAnnotations | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const annotations: NormalizedAnnotations = {};
+  if (record.bold === true) {
+    annotations.bold = true;
+  }
+  if (record.italic === true) {
+    annotations.italic = true;
+  }
+  if (record.strikethrough === true) {
+    annotations.strikethrough = true;
+  }
+  if (record.underline === true) {
+    annotations.underline = true;
+  }
+  if (record.code === true) {
+    annotations.code = true;
+  }
+  if (typeof record.color === "string" && record.color !== "default") {
+    annotations.color = record.color;
+  }
+  return Object.keys(annotations).length > 0 ? annotations : undefined;
+}
+
+function normalizeColor(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  return value === "default" ? undefined : value;
+}
+
+function normalizeCalloutIcon(
+  value: unknown,
+):
+  | { type: "emoji"; emoji: string }
+  | { type: "external"; url: string }
+  | { type: "file"; url: string }
+  | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const type = typeof record.type === "string" ? record.type : null;
+  if (!type) {
+    return undefined;
+  }
+  if (type === "emoji") {
+    const emoji = typeof record.emoji === "string" ? record.emoji : "";
+    return emoji ? { type: "emoji", emoji } : undefined;
+  }
+  if (type === "external") {
+    const external = record.external as Record<string, unknown> | undefined;
+    const url = external && typeof external.url === "string" ? external.url : "";
+    return url ? { type: "external", url } : undefined;
+  }
+  if (type === "file") {
+    const file = record.file as Record<string, unknown> | undefined;
+    const url = file && typeof file.url === "string" ? file.url : "";
+    return url ? { type: "file", url } : undefined;
+  }
+  return undefined;
+}
+
+function toCalloutIconRequest(value: unknown): CalloutIconRequest | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const type = typeof record.type === "string" ? record.type : null;
+  if (!type) {
+    return undefined;
+  }
+  if (type === "emoji") {
+    const emoji = typeof record.emoji === "string" ? record.emoji : "";
+    return emoji ? { type: "emoji", emoji } : undefined;
+  }
+  if (type === "external") {
+    const external = record.external as Record<string, unknown> | undefined;
+    const url = external && typeof external.url === "string" ? external.url : "";
+    return url ? { type: "external", external: { url } } : undefined;
+  }
+  return undefined;
+}
+
+function normalizeNotionIdValue(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  try {
+    return normalizeNotionId(value);
+  } catch {
+    return value;
+  }
+}
+
+function extractImageUrl(record: Record<string, unknown>): string | null {
+  const type = typeof record.type === "string" ? record.type : null;
+  if (type === "external") {
+    const external = record.external as Record<string, unknown> | undefined;
+    const url = external && typeof external.url === "string" ? external.url : null;
+    return url || null;
+  }
+  if (type === "file") {
+    const file = record.file as Record<string, unknown> | undefined;
+    const url = file && typeof file.url === "string" ? file.url : null;
+    return url || null;
+  }
+  return null;
 }
 
 function chunkArray<T>(items: T[], size: number): T[][] {
