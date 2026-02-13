@@ -51,6 +51,11 @@ type LogContext = {
   warn: (message: string) => void;
 };
 
+type SyncDecision = {
+  skipSync: boolean;
+  archivedOrMissing: boolean;
+};
+
 const defaultLogContext: LogContext = {
   info: (message) => core.info(message),
   warn: (message) => core.warning(message),
@@ -139,8 +144,11 @@ async function run(): Promise<void> {
         let pageUrl = doc.notionUrl;
         let didSync = false;
         if (pageId) {
-          const skipSync = await shouldSkipSync(notion, pageId, doc.absPath, workspaceRoot, log);
-          if (skipSync) {
+          const decision = await getSyncDecision(notion, pageId, doc.absPath, workspaceRoot, log);
+          if (decision.archivedOrMissing) {
+            log.warn(`Notion page missing or archived, recreating: ${effectiveTitle}`);
+            pageId = undefined;
+          } else if (decision.skipSync) {
             log.info("Skipping sync: Notion is up to date.");
             pageUrl = pageUrl ?? notionPageUrl(pageId);
           } else {
@@ -156,10 +164,10 @@ async function run(): Promise<void> {
               didSync = true;
               log.info(`Updated page: ${effectiveTitle}`);
             } catch (error) {
-              if (!isNotionNotFoundError(error)) {
+              if (!isNotionNotFoundError(error) && !isNotionArchivedError(error)) {
                 throw error;
               }
-              log.warn(`Notion page missing, recreating: ${effectiveTitle}`);
+              log.warn(`Notion page missing or archived, recreating: ${effectiveTitle}`);
               pageId = undefined;
             }
           }
@@ -270,6 +278,20 @@ function isNotionNotFoundError(error: unknown): boolean {
     return true;
   }
   return false;
+}
+
+function isNotionArchivedError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const err = error as { code?: string; message?: string };
+  if (err.code !== "validation_error") {
+    return false;
+  }
+  if (typeof err.message !== "string") {
+    return false;
+  }
+  return err.message.toLowerCase().includes("archived");
 }
 
 function normalizeTitlePrefixSeparator(value: string): string {
@@ -633,37 +655,58 @@ async function updatePageContent(
 
 const NOTION_SYNC_BUFFER_MS = 60_000;
 
-async function shouldSkipSync(
+async function getSyncDecision(
   notion: Client,
   pageId: string,
   filePath: string,
   workspaceRoot: string,
   logContext: LogContext = defaultLogContext,
-): Promise<boolean> {
+): Promise<SyncDecision> {
   const lastCommitTime = await getLastCommitTime(filePath, workspaceRoot);
   if (!lastCommitTime) {
     logContext.warn(`Unable to read git commit time for ${filePath}. Syncing.`);
-    return false;
   }
 
   /**
    * Notion API: Retrieve a page
    * https://developers.notion.com/reference/retrieve-a-page.md
    */
-  const page = await notionRequest(
-    () => notion.pages.retrieve({ page_id: toDashedId(pageId) }),
-    `pages.retrieve ${pageId}`,
-  );
+  let page: Awaited<ReturnType<Client["pages"]["retrieve"]>>;
+  try {
+    page = await notionRequest(
+      () => notion.pages.retrieve({ page_id: toDashedId(pageId) }),
+      `pages.retrieve ${pageId}`,
+    );
+  } catch (error) {
+    if (isNotionNotFoundError(error)) {
+      return { skipSync: false, archivedOrMissing: true };
+    }
+    throw error;
+  }
+
+  if ("archived" in page && page.archived) {
+    return { skipSync: false, archivedOrMissing: true };
+  }
+  if ("in_trash" in page && page.in_trash) {
+    return { skipSync: false, archivedOrMissing: true };
+  }
+  if (!lastCommitTime) {
+    return { skipSync: false, archivedOrMissing: false };
+  }
+
   const lastEdited = "last_edited_time" in page ? page.last_edited_time : null;
   if (!lastEdited) {
-    return false;
+    return { skipSync: false, archivedOrMissing: false };
   }
   const notionTime = new Date(lastEdited);
   if (Number.isNaN(notionTime.getTime())) {
-    return false;
+    return { skipSync: false, archivedOrMissing: false };
   }
 
-  return lastCommitTime.getTime() <= notionTime.getTime() + NOTION_SYNC_BUFFER_MS;
+  return {
+    skipSync: lastCommitTime.getTime() <= notionTime.getTime() + NOTION_SYNC_BUFFER_MS,
+    archivedOrMissing: false,
+  };
 }
 
 type CreatePageRequest = Parameters<Client["pages"]["create"]>[0];
