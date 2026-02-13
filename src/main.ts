@@ -46,13 +46,33 @@ type MappingEntry = {
   title?: string;
 };
 
+type LogContext = {
+  info: (message: string) => void;
+  warn: (message: string) => void;
+};
+
+const defaultLogContext: LogContext = {
+  info: (message) => core.info(message),
+  warn: (message) => core.warning(message),
+};
+
+function createLogContext(prefix?: string): LogContext {
+  if (!prefix) {
+    return defaultLogContext;
+  }
+  return {
+    info: (message) => core.info(`[${prefix}] ${message}`),
+    warn: (message) => core.warning(`[${prefix}] ${message}`),
+  };
+}
+
 async function run(): Promise<void> {
   try {
     const notionToken = readInput("notion_token", ["NOTION_TOKEN"]);
     const docsFolder = readInput("docs_folder", ["DOCS_FOLDER"]);
     const mappingFileInput = readInput("notion_mapping_file", ["NOTION_MAPPING_FILE"]);
-    const indexBlockInput = readInput("index_block_id", ["INDEX_BLOCK_ID"]);
-    const parentPageInput = readInput("parent_page_id", ["PARENT_PAGE_ID"]);
+    const pageBlockInput = readInput("page_block_id", ["PAGE_BLOCK_ID"]);
+    const pageInput = readInput("page_id", ["PAGE_ID"]);
     const titlePrefixSeparatorInput = readInput("title_prefix_separator", [
       "TITLE_PREFIX_SEPARATOR",
     ]);
@@ -81,12 +101,12 @@ async function run(): Promise<void> {
     await ensureDirectoryExists(docsFolderPath);
     const mappingFilePath = resolveMappingFilePath(docsFolderPath, workspaceRoot, mappingFileInput);
 
-    const indexBlockId = indexBlockInput ? normalizeNotionId(indexBlockInput) : null;
-    const indexParentPageId = indexBlockId ? await resolveParentPageId(notion, indexBlockId) : null;
-    const pagesParentId = parentPageInput ? normalizeNotionId(parentPageInput) : indexParentPageId;
+    const pageBlockId = pageBlockInput ? normalizeNotionId(pageBlockInput) : null;
+    const pageBlockParentId = pageBlockId ? await resolveParentPageId(notion, pageBlockId) : null;
+    const pagesParentId = pageInput ? normalizeNotionId(pageInput) : pageBlockParentId;
 
     if (!pagesParentId) {
-      throw new Error("Either index_block_id or parent_page_id must be provided.");
+      throw new Error("Either page_block_id or page_id must be provided.");
     }
     const titlePrefixSeparator = normalizeTitlePrefixSeparator(titlePrefixSeparatorInput);
     const prBranchPrefix = normalizePrBranchPrefix(prBranchPrefixInput);
@@ -112,33 +132,34 @@ async function run(): Promise<void> {
 
     for (const doc of documents) {
       try {
-        core.info(`[${doc.relPath}] Sync start: ${doc.title}`);
+        const log = createLogContext(doc.relPath);
+        log.info(`Sync start: ${doc.title}`);
         const effectiveTitle = buildTitleWithSeparator(doc, titlePrefixSeparator);
         let pageId = doc.notionPageId;
         let pageUrl = doc.notionUrl;
         let didSync = false;
         if (pageId) {
-          const skipSync = await shouldSkipSync(notion, pageId, doc.absPath, workspaceRoot);
+          const skipSync = await shouldSkipSync(notion, pageId, doc.absPath, workspaceRoot, log);
           if (skipSync) {
-            core.info(`[${doc.relPath}] Skipping sync: Notion is up to date.`);
+            log.info("Skipping sync: Notion is up to date.");
             pageUrl = pageUrl ?? notionPageUrl(pageId);
           } else {
             const resolveLink = (href: string) =>
               resolveRelativeLink(href, doc.absPath, docsFolderPath, knownPageUrls);
             const blocks = markdownToNotionBlocks(doc.body, {
               resolveLink,
-              logger: (message) => core.info(`[${doc.relPath}] ${message}`),
+              logger: (message) => log.info(message),
             });
             try {
-              await updatePageContent(notion, pageId, effectiveTitle, blocks);
+              await updatePageContent(notion, pageId, effectiveTitle, blocks, log);
               pageUrl = notionPageUrl(pageId);
               didSync = true;
-              core.info(`[${doc.relPath}] Updated page: ${effectiveTitle}`);
+              log.info(`Updated page: ${effectiveTitle}`);
             } catch (error) {
               if (!isNotionNotFoundError(error)) {
                 throw error;
               }
-              core.warning(`[${doc.relPath}] Notion page missing, recreating: ${effectiveTitle}`);
+              log.warn(`Notion page missing, recreating: ${effectiveTitle}`);
               pageId = undefined;
             }
           }
@@ -149,19 +170,17 @@ async function run(): Promise<void> {
             resolveRelativeLink(href, doc.absPath, docsFolderPath, knownPageUrls);
           const blocks = markdownToNotionBlocks(doc.body, {
             resolveLink,
-            logger: (message) => core.info(`[${doc.relPath}] ${message}`),
+            logger: (message) => log.info(message),
           });
           const pageParentId = pagesParentId;
           const created = await createPage(notion, pageParentId, effectiveTitle);
           pageId = normalizeNotionId(created.id);
           pageUrl = created.url || notionPageUrl(pageId);
-          core.info(`[${doc.relPath}] Created page: ${effectiveTitle}`);
+          log.info(`Created page: ${effectiveTitle}`);
           if (pageUrl) {
-            core.info(`[${doc.relPath}] Page URL: ${pageUrl}`);
+            log.info(`Page URL: ${pageUrl}`);
           }
-          await appendBlocksSafe(notion, pageId, blocks, (msg) =>
-            core.warning(`[${doc.relPath}] ${msg}`),
-          );
+          await appendBlocksSafe(notion, pageId, blocks, log);
           didSync = true;
         }
 
@@ -191,8 +210,15 @@ async function run(): Promise<void> {
       }
     }
 
-    if (indexBlockId && indexParentPageId && syncedPages.length > 0) {
-      await appendPageLinksAfterAnchor(notion, indexParentPageId, indexBlockId, syncedPages);
+    if (pageBlockId && pageBlockParentId && syncedPages.length > 0) {
+      const indexLog = createLogContext("index");
+      await appendPageLinksAfterAnchor(
+        notion,
+        pageBlockParentId,
+        pageBlockId,
+        syncedPages,
+        indexLog,
+      );
     }
 
     if (mappingDirty) {
@@ -464,9 +490,8 @@ async function loadDocuments(
       }
     }
 
-    const titleFromFrontMatter = typeof attributes.title === "string" ? attributes.title : "";
     const titleFromMarkdown = extractTitle(body);
-    const title = titleFromFrontMatter || titleFromMarkdown || path.basename(filePath, ".md");
+    const title = titleFromMarkdown || path.basename(filePath, ".md");
 
     documents.push({
       absPath: filePath,
@@ -587,8 +612,9 @@ async function updatePageContent(
   pageId: string,
   title: string,
   blocks: NotionBlock[],
+  logContext: LogContext = defaultLogContext,
 ): Promise<void> {
-  core.info(`Updating page metadata for ${pageId}...`);
+  logContext.info(`Updating page metadata for ${pageId}...`);
   /**
    * Notion API: Update page properties
    * https://developers.notion.com/reference/patch-page.md
@@ -601,8 +627,8 @@ async function updatePageContent(
       }),
     `pages.update ${pageId}`,
   );
-  core.info(`Starting block sync for ${pageId}...`);
-  await syncPageBlocks(notion, pageId, blocks);
+  logContext.info(`Starting block sync for ${pageId}...`);
+  await syncPageBlocks(notion, pageId, blocks, logContext);
 }
 
 const NOTION_SYNC_BUFFER_MS = 60_000;
@@ -612,10 +638,11 @@ async function shouldSkipSync(
   pageId: string,
   filePath: string,
   workspaceRoot: string,
+  logContext: LogContext = defaultLogContext,
 ): Promise<boolean> {
   const lastCommitTime = await getLastCommitTime(filePath, workspaceRoot);
   if (!lastCommitTime) {
-    core.warning(`Unable to read git commit time for ${filePath}. Syncing.`);
+    logContext.warn(`Unable to read git commit time for ${filePath}. Syncing.`);
     return false;
   }
 
@@ -752,16 +779,20 @@ async function persistNotionIds(
   core.info(`Opened PR: ${pr.data.html_url}`);
 }
 
-async function clearChildren(notion: Client, blockId: string): Promise<void> {
-  core.info(`Starting block deletion for ${blockId}...`);
+async function clearChildren(
+  notion: Client,
+  blockId: string,
+  logContext: LogContext = defaultLogContext,
+): Promise<void> {
+  logContext.info(`Starting block deletion for ${blockId}...`);
   const children = await listAllChildren(notion, blockId);
   if (children.length === 0) {
-    core.info("No existing blocks to clear.");
+    logContext.info("No existing blocks to clear.");
     return;
   }
 
   const concurrencyLimit = 3;
-  core.info(`Deleting ${children.length} existing blocks...`);
+  logContext.info(`Deleting ${children.length} existing blocks...`);
 
   const chunks = chunkArray(children, concurrencyLimit);
 
@@ -770,7 +801,7 @@ async function clearChildren(notion: Client, blockId: string): Promise<void> {
       chunk.map(async (child) => {
         const blockIdValue = "id" in child ? child.id : null;
         if (typeof blockIdValue !== "string" || blockIdValue.length === 0) {
-          core.warning("Skipping delete for block with missing id.");
+          logContext.warn("Skipping delete for block with missing id.");
           return;
         }
         try {
@@ -787,18 +818,18 @@ async function clearChildren(notion: Client, blockId: string): Promise<void> {
             return;
           }
           const message = error instanceof Error ? error.message : String(error);
-          core.warning(`Failed to delete block ${blockIdValue}: ${message}`);
+          logContext.warn(`Failed to delete block ${blockIdValue}: ${message}`);
         }
       }),
     );
 
     if (chunkIndex % 20 === 0 && chunkIndex > 0) {
       const deletedCount = Math.min((chunkIndex + 1) * concurrencyLimit, children.length);
-      core.info(`Deleted ${deletedCount}/${children.length} blocks...`);
+      logContext.info(`Deleted ${deletedCount}/${children.length} blocks...`);
     }
   }
 
-  core.info("Finished clearing page.");
+  logContext.info("Finished clearing page.");
 }
 
 async function listAllChildren(
@@ -846,20 +877,23 @@ async function syncPageBlocks(
   notion: Client,
   pageId: string,
   blocks: NotionBlock[],
+  logContext: LogContext = defaultLogContext,
 ): Promise<void> {
   if (blocks.length === 0) {
-    await clearChildren(notion, pageId);
+    await clearChildren(notion, pageId, logContext);
     return;
   }
 
-  core.info(`Loading existing blocks for ${pageId}...`);
+  logContext.info(`Loading existing blocks for ${pageId}...`);
   const existingChildren = await listAllChildren(notion, pageId);
   if (existingChildren.length === 0) {
-    await appendBlocksSafe(notion, pageId, blocks, (msg) => core.warning(msg));
+    await appendBlocksSafe(notion, pageId, blocks, logContext);
     return;
   }
 
-  core.info(`Syncing ${blocks.length} blocks with ${existingChildren.length} existing blocks.`);
+  logContext.info(
+    `Syncing ${blocks.length} blocks with ${existingChildren.length} existing blocks.`,
+  );
 
   const stats: BlockSyncStats = {
     unchanged: 0,
@@ -876,11 +910,11 @@ async function syncPageBlocks(
     const existing = existingChildren[index];
     const existingId = getBlockId(existing);
     if (!existingId) {
-      core.warning("Skipping existing block with missing id.");
+      logContext.warn("Skipping existing block with missing id.");
       continue;
     }
     const incoming = blocks[index];
-    const result = await syncBlockPair(notion, pageId, existing, incoming);
+    const result = await syncBlockPair(notion, pageId, existing, incoming, logContext);
     switch (result.action) {
       case "unchanged":
         stats.unchanged += 1;
@@ -904,9 +938,9 @@ async function syncPageBlocks(
     const remaining = blocks.slice(sharedCount);
     if (remaining.length > 0) {
       if (lastBlockId) {
-        await appendBlocksAfter(notion, pageId, lastBlockId, remaining, (msg) => core.warning(msg));
+        await appendBlocksAfter(notion, pageId, lastBlockId, remaining, logContext);
       } else {
-        await appendBlocksSafe(notion, pageId, remaining, (msg) => core.warning(msg));
+        await appendBlocksSafe(notion, pageId, remaining, logContext);
       }
       stats.appended += remaining.length;
     }
@@ -914,10 +948,10 @@ async function syncPageBlocks(
 
   if (existingChildren.length > blocks.length) {
     const remainingExisting = existingChildren.slice(sharedCount);
-    stats.deleted += await deleteBlocks(notion, remainingExisting);
+    stats.deleted += await deleteBlocks(notion, remainingExisting, logContext);
   }
 
-  core.info(
+  logContext.info(
     `Block sync complete. Unchanged: ${stats.unchanged}, updated: ${stats.updated}, replaced: ${stats.replaced}, appended: ${stats.appended}, deleted: ${stats.deleted}.`,
   );
 }
@@ -927,6 +961,7 @@ async function syncBlockPair(
   parentPageId: string,
   existing: PartialBlockObjectResponse,
   incoming: NotionBlock,
+  logContext: LogContext = defaultLogContext,
 ): Promise<BlockSyncResult> {
   const existingId = getBlockId(existing);
   const existingType = getBlockType(existing);
@@ -941,25 +976,31 @@ async function syncBlockPair(
   if (existingType === incoming.type) {
     if (areBlocksEquivalent(existing, incoming)) {
       if (hasChildrenToSync) {
-        await syncPageBlocks(notion, existingId, incomingChildren);
+        await syncPageBlocks(notion, existingId, incomingChildren, logContext);
         return { action: "updated" };
       }
       return { action: "unchanged" };
     }
 
     if (canUpdateBlockType(incoming.type)) {
-      const updated = await updateBlockContent(notion, existingId, incoming);
+      const updated = await updateBlockContent(notion, existingId, incoming, logContext);
       if (updated) {
         if (hasChildrenToSync) {
-          await syncPageBlocks(notion, existingId, incomingChildren);
+          await syncPageBlocks(notion, existingId, incomingChildren, logContext);
         }
         return { action: "updated" };
       }
     }
   }
 
-  const newBlockId = await appendSingleBlockAfter(notion, parentPageId, existingId, incoming);
-  await deleteBlockSafe(notion, existingId);
+  const newBlockId = await appendSingleBlockAfter(
+    notion,
+    parentPageId,
+    existingId,
+    incoming,
+    logContext,
+  );
+  await deleteBlockSafe(notion, existingId, logContext);
   return { action: "replaced", newBlockId };
 }
 
@@ -1018,6 +1059,7 @@ async function updateBlockContent(
   notion: Client,
   blockId: string,
   block: NotionBlock,
+  logContext: LogContext = defaultLogContext,
 ): Promise<boolean> {
   const request = buildBlockUpdateRequest(blockId, block);
   if (!request) {
@@ -1035,7 +1077,7 @@ async function updateBlockContent(
       throw error;
     }
     const message = error instanceof Error ? error.message : String(error);
-    core.warning(`Block update failed for ${blockId}: ${message}. Replacing block.`);
+    logContext.warn(`Block update failed for ${blockId}: ${message}. Replacing block.`);
     return false;
   }
 }
@@ -1175,8 +1217,9 @@ async function appendSingleBlockAfter(
   parentPageId: string,
   anchorBlockId: string,
   block: NotionBlock,
+  logContext: LogContext = defaultLogContext,
 ): Promise<string> {
-  core.info(`Starting single block creation after ${anchorBlockId}.`);
+  logContext.info(`Starting single block creation after ${anchorBlockId}.`);
   /**
    * Notion API: Append block children
    * https://developers.notion.com/reference/patch-block-children.md
@@ -1197,12 +1240,16 @@ async function appendSingleBlockAfter(
   throw new Error("Unable to determine id for appended block.");
 }
 
-async function deleteBlocks(notion: Client, blocks: PartialBlockObjectResponse[]): Promise<number> {
+async function deleteBlocks(
+  notion: Client,
+  blocks: PartialBlockObjectResponse[],
+  logContext: LogContext = defaultLogContext,
+): Promise<number> {
   if (blocks.length === 0) {
     return 0;
   }
 
-  core.info(`Starting batch delete for ${blocks.length} blocks...`);
+  logContext.info(`Starting batch delete for ${blocks.length} blocks...`);
   const concurrencyLimit = 3;
   const chunks = chunkArray(blocks, concurrencyLimit);
   let deletedCount = 0;
@@ -1212,22 +1259,26 @@ async function deleteBlocks(notion: Client, blocks: PartialBlockObjectResponse[]
       chunk.map(async (block) => {
         const blockId = getBlockId(block);
         if (!blockId) {
-          core.warning("Skipping delete for block with missing id.");
+          logContext.warn("Skipping delete for block with missing id.");
           return;
         }
-        await deleteBlockSafe(notion, blockId);
+        await deleteBlockSafe(notion, blockId, logContext);
       }),
     );
     deletedCount += chunk.length;
     if (deletedCount % 50 === 0 || deletedCount === blocks.length) {
-      core.info(`Deleted ${deletedCount}/${blocks.length} trailing blocks...`);
+      logContext.info(`Deleted ${deletedCount}/${blocks.length} trailing blocks...`);
     }
   }
 
   return deletedCount;
 }
 
-async function deleteBlockSafe(notion: Client, blockId: string): Promise<void> {
+async function deleteBlockSafe(
+  notion: Client,
+  blockId: string,
+  logContext: LogContext = defaultLogContext,
+): Promise<void> {
   try {
     /**
      * Notion API: Delete a block
@@ -1242,7 +1293,7 @@ async function deleteBlockSafe(notion: Client, blockId: string): Promise<void> {
       return;
     }
     const message = error instanceof Error ? error.message : String(error);
-    core.warning(`Failed to delete block ${blockId}: ${message}`);
+    logContext.warn(`Failed to delete block ${blockId}: ${message}`);
   }
 }
 
@@ -1250,13 +1301,13 @@ async function appendBlocksSafe(
   notion: Client,
   blockId: string,
   blocks: NotionBlock[],
-  logger: (message: string) => void,
+  logContext: LogContext = defaultLogContext,
 ): Promise<void> {
   if (blocks.length === 0) {
     return;
   }
 
-  core.info(`Starting block creation for ${blockId} (${blocks.length} blocks).`);
+  logContext.info(`Starting block creation for ${blockId} (${blocks.length} blocks).`);
   const chunks = chunkArray(blocks, 50);
   for (const chunk of chunks) {
     const requestChunk = toNotionBlockRequests(chunk);
@@ -1275,7 +1326,7 @@ async function appendBlocksSafe(
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      logger(`Chunk append failed: ${message}. Retrying block-by-block.`);
+      logContext.warn(`Chunk append failed: ${message}. Retrying block-by-block.`);
       for (const block of chunk) {
         try {
           /**
@@ -1293,7 +1344,7 @@ async function appendBlocksSafe(
         } catch (blockError) {
           const blockMessage =
             blockError instanceof Error ? blockError.message : String(blockError);
-          logger(`Failed to append block (${block.type}): ${blockMessage}`);
+          logContext.warn(`Failed to append block (${block.type}): ${blockMessage}`);
         }
       }
     }
@@ -1305,13 +1356,13 @@ async function appendBlocksAfter(
   parentPageId: string,
   anchorBlockId: string,
   blocks: NotionBlock[],
-  logger: (message: string) => void,
+  logContext: LogContext = defaultLogContext,
 ): Promise<void> {
   if (blocks.length === 0) {
     return;
   }
 
-  core.info(`Starting block creation after ${anchorBlockId} (${blocks.length} blocks).`);
+  logContext.info(`Starting block creation after ${anchorBlockId} (${blocks.length} blocks).`);
   const chunks = chunkArray(blocks, 50);
   let afterBlockId = toDashedId(anchorBlockId);
 
@@ -1337,7 +1388,7 @@ async function appendBlocksAfter(
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      logger(`Chunk append failed: ${message}. Retrying block-by-block.`);
+      logContext.warn(`Chunk append failed: ${message}. Retrying block-by-block.`);
       for (const block of chunk) {
         try {
           /**
@@ -1360,7 +1411,7 @@ async function appendBlocksAfter(
         } catch (innerError) {
           const innerMessage =
             innerError instanceof Error ? innerError.message : String(innerError);
-          logger(`Block append failed: ${innerMessage}`);
+          logContext.warn(`Block append failed: ${innerMessage}`);
         }
       }
     }
@@ -1372,8 +1423,9 @@ async function appendPageLinksAfterAnchor(
   parentPageId: string,
   anchorBlockId: string,
   pages: SyncedPage[],
+  logContext: LogContext = defaultLogContext,
 ): Promise<void> {
-  core.info(`Starting index link sync for anchor ${anchorBlockId}...`);
+  logContext.info(`Starting index link sync for anchor ${anchorBlockId}...`);
   const existingChildren = await listAllChildren(notion, parentPageId);
   const anchorId = normalizeNotionId(anchorBlockId);
   const anchorIndex = existingChildren.findIndex((child) => {
@@ -1418,18 +1470,16 @@ async function appendPageLinksAfterAnchor(
   }
 
   if (existingLinkBlocks.length > 0) {
-    core.info(`Replacing ${existingLinkBlocks.length} index link blocks.`);
-    await deleteBlocks(notion, existingLinkBlocks);
+    logContext.info(`Replacing ${existingLinkBlocks.length} index link blocks.`);
+    await deleteBlocks(notion, existingLinkBlocks, logContext);
   }
 
   if (blocks.length === 0) {
-    core.info("Index anchor cleared. No pages to link.");
+    logContext.info("Index anchor cleared. No pages to link.");
     return;
   }
 
-  await appendBlocksAfter(notion, parentPageId, anchorBlockId, blocks, (message) =>
-    core.warning(message),
-  );
+  await appendBlocksAfter(notion, parentPageId, anchorBlockId, blocks, logContext);
 }
 
 type NormalizedAnnotations = {

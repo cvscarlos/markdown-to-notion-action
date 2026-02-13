@@ -8,18 +8,19 @@ inputs:
 
   docs_folder:
     description: "Path to folder containing markdown files"
-    required: true
+    required: false
+    default: "docs"
 
   notion_mapping_file:
     description: "Path to the markdown table used to store notion_page_id mappings (default: <docs_folder>/_notion_links.md)"
     required: false
 
-  index_block_id:
+  page_block_id:
     description: "Anchor block ID/URL used to insert page shortcut links after this block"
     required: false
 
-  parent_page_id:
-    description: "Notion page ID where files will be created when index_block_id is not provided"
+  page_id:
+    description: "Notion page ID where files will be created when page_block_id is not provided"
     required: false
 
   title_prefix_separator:
@@ -57,8 +58,8 @@ runs:
         INPUT_NOTION_TOKEN: ${{ inputs.notion_token }}
         INPUT_DOCS_FOLDER: ${{ inputs.docs_folder }}
         INPUT_NOTION_MAPPING_FILE: ${{ inputs.notion_mapping_file }}
-        INPUT_INDEX_BLOCK_ID: ${{ inputs.index_block_id }}
-        INPUT_PARENT_PAGE_ID: ${{ inputs.parent_page_id }}
+        INPUT_PAGE_BLOCK_ID: ${{ inputs.page_block_id }}
+        INPUT_PAGE_ID: ${{ inputs.page_id }}
         INPUT_TITLE_PREFIX_SEPARATOR: ${{ inputs.title_prefix_separator }}
         INPUT_COMMIT_STRATEGY: ${{ inputs.commit_strategy }}
         INPUT_PR_BRANCH_PREFIX: ${{ inputs.pr_branch_prefix }}
