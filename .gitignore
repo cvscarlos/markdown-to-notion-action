@@ -1,4 +1,6 @@
-tmp/
-node_modules/
-dist/
+.DS_Store
+
 coverage/
+dist/
+node_modules/
+tmp/
