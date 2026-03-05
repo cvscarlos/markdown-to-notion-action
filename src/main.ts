@@ -403,6 +403,7 @@ async function formatMappingFileIfFormatterAvailable(
   mappingFilePath: string,
   workspaceRoot: string,
 ): Promise<void> {
+  core.info(`Formatting mapping file: ${mappingFilePath}`);
   const formatters: FormatterOption[] = [
     {
       command: "prettier",
@@ -418,33 +419,40 @@ async function formatMappingFileIfFormatterAvailable(
 
   for (const formatter of formatters) {
     if (!(await isFormatterAvailable(formatter.command, workspaceRoot))) {
+      core.info(`${formatter.displayName} not available in caller workspace.`);
       continue;
     }
 
-    const formatted = await runFormatterCommand(
+    core.info(`Formatting mapping file with ${formatter.displayName}...`);
+    const result = await runFormatterCommand(
       [formatter.command, ...formatter.formatArgs, mappingFilePath],
       workspaceRoot,
     );
-    if (formatted) {
-      core.info(`Formatted mapping file with ${formatter.displayName}: ${mappingFilePath}`);
+    if (result.success) {
+      core.info(`Formatted mapping file with ${formatter.displayName}.`);
       return;
     }
-    core.warning(`${formatter.displayName} is installed but failed to format: ${mappingFilePath}`);
+    const errorSuffix = result.error ? ` (${result.error})` : "";
+    core.warning(`${formatter.displayName} is installed but failed to format${errorSuffix}.`);
   }
 
   core.info("No supported formatter found in caller workspace (checked: Prettier, Biome).");
 }
 
-async function runFormatterCommand(args: string[], workspaceRoot: string): Promise<boolean> {
+async function runFormatterCommand(
+  args: string[],
+  workspaceRoot: string,
+): Promise<{ success: boolean; error?: string }> {
   const commandArgs = ["--no-install", ...args];
   try {
     await execFileAsync("npx", commandArgs, {
       cwd: workspaceRoot,
       env: process.env,
     });
-    return true;
-  } catch {
-    return false;
+    return { success: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { success: false, error: message };
   }
 }
 
