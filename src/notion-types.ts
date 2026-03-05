@@ -240,9 +240,10 @@ export type EquationBlock = {
 export type ImageBlock = {
   type: "image";
   image: {
-    type: "external" | "file";
+    type: "external" | "file" | "file_upload";
     external?: { url: string };
     file?: { url: string; expiry_time?: string };
+    file_upload?: { id: string };
     caption?: NotionRichText[];
   };
 } & NotionBlockBase;

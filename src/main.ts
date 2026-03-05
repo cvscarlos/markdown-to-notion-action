@@ -1,9 +1,11 @@
 import * as core from "@actions/core";
 import * as github from "@actions/github";
 import { Client } from "@notionhq/client";
+import { execFile } from "child_process";
 import * as fm from "front-matter";
 import * as fs from "fs/promises";
 import * as path from "path";
+import { promisify } from "util";
 import { markdownToNotionBlocks, extractTitle } from "./markdown-to-notion.js";
 import type { NotionBlock } from "./notion-types.js";
 import {
@@ -56,10 +58,21 @@ type SyncDecision = {
   archivedOrMissing: boolean;
 };
 
+type FormatterOption = {
+  command: string;
+  displayName: string;
+  formatArgs: string[];
+};
+
 const defaultLogContext: LogContext = {
   info: (message) => core.info(message),
   warn: (message) => core.warning(message),
 };
+
+const MAX_IMAGE_UPLOAD_BYTES = 20 * 1024 * 1024;
+const UPLOADABLE_IMAGE_EXTENSIONS = new Set([".gif", ".jpeg", ".jpg", ".png"]);
+
+const execFileAsync = promisify(execFile);
 
 function createLogContext(prefix?: string): LogContext {
   if (!prefix) {
@@ -153,11 +166,12 @@ async function run(): Promise<void> {
             pageUrl = pageUrl ?? notionPageUrl(pageId);
           } else {
             const resolveLink = (href: string) =>
-              resolveRelativeLink(href, doc.absPath, docsFolderPath, knownPageUrls);
+              resolveRelativeLink(href, doc.absPath, docsFolderPath, workspaceRoot, knownPageUrls);
             const blocks = markdownToNotionBlocks(doc.body, {
               resolveLink,
               logger: (message) => log.info(message),
             });
+            await uploadImageBlocks(notion, blocks, githubToken, log);
             try {
               await updatePageContent(notion, pageId, effectiveTitle, blocks, log);
               pageUrl = notionPageUrl(pageId);
@@ -175,11 +189,12 @@ async function run(): Promise<void> {
 
         if (!pageId) {
           const resolveLink = (href: string) =>
-            resolveRelativeLink(href, doc.absPath, docsFolderPath, knownPageUrls);
+            resolveRelativeLink(href, doc.absPath, docsFolderPath, workspaceRoot, knownPageUrls);
           const blocks = markdownToNotionBlocks(doc.body, {
             resolveLink,
             logger: (message) => log.info(message),
           });
+          await uploadImageBlocks(notion, blocks, githubToken, log);
           const pageParentId = pagesParentId;
           const created = await createPage(notion, pageParentId, effectiveTitle);
           pageId = normalizeNotionId(created.id);
@@ -231,6 +246,9 @@ async function run(): Promise<void> {
 
     if (mappingDirty) {
       await writeMappingFile(mappingFilePath, mappingEntries);
+      if (commitStrategy !== "none") {
+        await formatMappingFileIfFormatterAvailable(mappingFilePath, workspaceRoot);
+      }
       changedFiles.push(path.relative(workspaceRoot, mappingFilePath));
     }
 
@@ -379,6 +397,67 @@ async function writeMappingFile(
 ): Promise<void> {
   const lines = buildMappingTable(entries);
   await fs.writeFile(mappingFilePath, lines, "utf8");
+}
+
+async function formatMappingFileIfFormatterAvailable(
+  mappingFilePath: string,
+  workspaceRoot: string,
+): Promise<void> {
+  const formatters: FormatterOption[] = [
+    {
+      command: "prettier",
+      displayName: "Prettier",
+      formatArgs: ["--write"],
+    },
+    {
+      command: "@biomejs/biome",
+      displayName: "Biome",
+      formatArgs: ["format", "--write"],
+    },
+  ];
+
+  for (const formatter of formatters) {
+    if (!(await isFormatterAvailable(formatter.command, workspaceRoot))) {
+      continue;
+    }
+
+    const formatted = await runFormatterCommand(
+      [formatter.command, ...formatter.formatArgs, mappingFilePath],
+      workspaceRoot,
+    );
+    if (formatted) {
+      core.info(`Formatted mapping file with ${formatter.displayName}: ${mappingFilePath}`);
+      return;
+    }
+    core.warning(`${formatter.displayName} is installed but failed to format: ${mappingFilePath}`);
+  }
+
+  core.info("No supported formatter found in caller workspace (checked: Prettier, Biome).");
+}
+
+async function runFormatterCommand(args: string[], workspaceRoot: string): Promise<boolean> {
+  const commandArgs = ["--no-install", ...args];
+  try {
+    await execFileAsync("npx", commandArgs, {
+      cwd: workspaceRoot,
+      env: process.env,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function isFormatterAvailable(formatter: string, workspaceRoot: string): Promise<boolean> {
+  try {
+    await execFileAsync("npx", ["--no-install", formatter, "--version"], {
+      cwd: workspaceRoot,
+      env: process.env,
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function parseMappingTable(content: string): { header: string[]; rows: string[][] } | null {
@@ -534,6 +613,7 @@ function resolveRelativeLink(
   href: string,
   currentFilePath: string,
   docsRoot: string,
+  workspaceRoot: string,
   knownPageUrls: Map<string, string>,
 ): string | null {
   const cleaned = href.split("#")[0].split("?")[0];
@@ -551,7 +631,255 @@ function resolveRelativeLink(
     return knownPageUrls.get(resolvedPath) || null;
   }
 
-  return null;
+  const repoRelativePath = path.relative(workspaceRoot, resolvedPath);
+  if (repoRelativePath.startsWith("..") || path.isAbsolute(repoRelativePath)) {
+    return null;
+  }
+
+  return buildGitHubRawUrl(repoRelativePath);
+}
+
+function buildGitHubRawUrl(repoRelativePath: string): string | null {
+  const ownerRepo = process.env.GITHUB_REPOSITORY;
+  if (!ownerRepo) {
+    return null;
+  }
+  const ref = process.env.GITHUB_SHA || process.env.GITHUB_REF_NAME;
+  if (!ref) {
+    return null;
+  }
+  const normalizedPath = repoRelativePath.split(path.sep).join("/");
+  const serverUrl = (process.env.GITHUB_SERVER_URL || "https://github.com").replace(/\/+$/, "");
+  if (serverUrl === "https://github.com") {
+    return `https://raw.githubusercontent.com/${ownerRepo}/${ref}/${normalizedPath}`;
+  }
+  return `${serverUrl}/raw/${ownerRepo}/${ref}/${normalizedPath}`;
+}
+
+type GitHubRawLocation = {
+  ownerRepo: string;
+  ref: string;
+  path: string;
+};
+
+type GitHubFile = {
+  buffer: Buffer;
+  contentType: string;
+  size: number;
+  filename: string;
+  path: string;
+};
+
+function parseGitHubRawUrl(url: string): GitHubRawLocation | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+
+  if (parsed.hostname === "raw.githubusercontent.com") {
+    const segments = parsed.pathname.split("/").filter(Boolean);
+    if (segments.length < 4) {
+      return null;
+    }
+    return {
+      ownerRepo: `${segments[0]}/${segments[1]}`,
+      ref: segments[2],
+      path: segments.slice(3).join("/"),
+    };
+  }
+
+  const serverUrl = (process.env.GITHUB_SERVER_URL || "https://github.com").replace(/\/+$/, "");
+  if (parsed.origin !== serverUrl) {
+    return null;
+  }
+  const segments = parsed.pathname.split("/").filter(Boolean);
+  if (segments.length < 5 || segments[0] !== "raw") {
+    return null;
+  }
+  return {
+    ownerRepo: `${segments[1]}/${segments[2]}`,
+    ref: segments[3],
+    path: segments.slice(4).join("/"),
+  };
+}
+
+function buildGitHubContentsUrl(location: GitHubRawLocation): string | null {
+  const apiBase = (process.env.GITHUB_API_URL || "https://api.github.com").replace(/\/+$/, "");
+  if (!apiBase) {
+    return null;
+  }
+  const encodedPath = location.path.split("/").map(encodeURIComponent).join("/");
+  const encodedRef = encodeURIComponent(location.ref);
+  return `${apiBase}/repos/${location.ownerRepo}/contents/${encodedPath}?ref=${encodedRef}`;
+}
+
+function getImageContentTypeFromExtension(extension: string): string | null {
+  switch (extension.toLowerCase()) {
+    case ".gif":
+      return "image/gif";
+    case ".jpeg":
+    case ".jpg":
+      return "image/jpeg";
+    case ".png":
+      return "image/png";
+    default:
+      return null;
+  }
+}
+
+function isUploadableImageExtension(extension: string): boolean {
+  return UPLOADABLE_IMAGE_EXTENSIONS.has(extension.toLowerCase());
+}
+
+async function fetchGitHubFile(
+  location: GitHubRawLocation,
+  githubToken: string | null,
+  logContext: LogContext,
+): Promise<GitHubFile | null> {
+  const url = buildGitHubContentsUrl(location);
+  if (!url) {
+    logContext.warn(`Skipping image ${location.path}: GitHub API base URL not available.`);
+    return null;
+  }
+
+  const headers: Record<string, string> = {
+    Accept: "application/vnd.github.raw+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+  };
+  if (githubToken) {
+    headers.Authorization = `Bearer ${githubToken}`;
+  }
+
+  const response = await fetch(url, { headers });
+  if (!response.ok) {
+    logContext.warn(`Skipping image ${location.path}: GitHub fetch failed (${response.status}).`);
+    return null;
+  }
+
+  const contentLengthHeader = response.headers.get("content-length");
+  if (contentLengthHeader) {
+    const contentLength = Number(contentLengthHeader);
+    if (Number.isFinite(contentLength) && contentLength > MAX_IMAGE_UPLOAD_BYTES) {
+      logContext.warn(
+        `Skipping image ${location.path}: file size ${contentLength} exceeds 20MB limit.`,
+      );
+      return null;
+    }
+  }
+
+  const arrayBuffer = await response.arrayBuffer();
+  const buffer = Buffer.from(arrayBuffer);
+  if (buffer.length > MAX_IMAGE_UPLOAD_BYTES) {
+    logContext.warn(
+      `Skipping image ${location.path}: file size ${buffer.length} exceeds 20MB limit.`,
+    );
+    return null;
+  }
+
+  const headerContentType = response.headers.get("content-type") || "";
+  const extension = path.extname(location.path).toLowerCase();
+  const contentType = headerContentType.startsWith("image/")
+    ? headerContentType
+    : getImageContentTypeFromExtension(extension);
+  if (!contentType) {
+    logContext.warn(`Skipping image ${location.path}: unsupported content type.`);
+    return null;
+  }
+
+  return {
+    buffer,
+    contentType,
+    size: buffer.length,
+    filename: path.basename(location.path),
+    path: location.path,
+  };
+}
+
+async function uploadImageBlocks(
+  notion: Client,
+  blocks: NotionBlock[],
+  githubToken: string | null,
+  logContext: LogContext,
+): Promise<void> {
+  for (const block of blocks) {
+    await uploadImageBlock(notion, block, githubToken, logContext);
+    const children = getBlockChildren(block);
+    if (children.length > 0) {
+      await uploadImageBlocks(notion, children, githubToken, logContext);
+    }
+  }
+}
+
+async function uploadImageBlock(
+  notion: Client,
+  block: NotionBlock,
+  githubToken: string | null,
+  logContext: LogContext,
+): Promise<void> {
+  if (block.type !== "image") {
+    return;
+  }
+  const image = block.image;
+  if (image.type !== "external" || !image.external?.url) {
+    return;
+  }
+
+  const location = parseGitHubRawUrl(image.external.url);
+  if (!location) {
+    return;
+  }
+
+  const extension = path.extname(location.path).toLowerCase();
+  if (!isUploadableImageExtension(extension)) {
+    return;
+  }
+
+  const file = await fetchGitHubFile(location, githubToken, logContext);
+  if (!file) {
+    return;
+  }
+
+  logContext.info(`Uploading image ${file.path} (${file.size} bytes)...`);
+  /**
+   * Notion API: Create a file upload
+   * https://developers.notion.com/reference/create-a-file-upload.md
+   */
+  const upload = await notionRequest(
+    () =>
+      notion.fileUploads.create({
+        mode: "single_part",
+        filename: file.filename,
+        content_type: file.contentType,
+      }),
+    `fileUploads.create ${file.filename}`,
+  );
+  const uploadId = upload.id;
+
+  const blob = new Blob([new Uint8Array(file.buffer)], { type: file.contentType });
+  /**
+   * Notion API: Send a file upload
+   * https://developers.notion.com/reference/send-a-file-upload.md
+   */
+  await notionRequest(
+    () =>
+      notion.fileUploads.send({
+        file_upload_id: uploadId,
+        file: {
+          data: blob,
+          filename: file.filename,
+        },
+      }),
+    `fileUploads.send ${uploadId}`,
+  );
+
+  const caption = image.caption;
+  block.image = {
+    type: "file_upload",
+    file_upload: { id: uploadId },
+    ...(caption ? { caption } : {}),
+  };
 }
 
 function normalizeNotionId(input: string): string {

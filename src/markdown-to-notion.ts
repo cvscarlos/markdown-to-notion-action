@@ -87,9 +87,45 @@ function sanitizeBlock(block: NotionBlock, options: MarkdownToNotionOptions): No
     if (Array.isArray(contentRecord.children)) {
       contentRecord.children = sanitizeBlocks(contentRecord.children as NotionBlock[], options);
     }
+    if (type === "image") {
+      normalizeImageBlock(contentRecord, options);
+    }
   }
 
   return block;
+}
+
+function normalizeImageBlock(
+  contentRecord: Record<string, unknown>,
+  options: MarkdownToNotionOptions,
+): void {
+  if (contentRecord.type !== "external") {
+    return;
+  }
+  const external = contentRecord.external;
+  if (!isUrlRecord(external)) {
+    return;
+  }
+  const url = external.url.trim();
+  if (!isRelativeLink(url)) {
+    return;
+  }
+  if (!options.resolveLink) {
+    return;
+  }
+  const resolved = options.resolveLink(url);
+  if (!resolved) {
+    return;
+  }
+  external.url = resolved;
+}
+
+function isUrlRecord(value: unknown): value is { url: string } {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return typeof record.url === "string";
 }
 
 function sanitizeRichText(
