@@ -66,15 +66,35 @@ type FormatterOption = {
   formatArgs: string[];
 };
 
+type FormatterSettings = {
+  command: string;
+  displayName: string;
+  baseArgs: string[];
+  configFlag: string;
+};
+
 const defaultLogContext: LogContext = {
   info: (message) => core.info(message),
   warn: (message) => core.warning(message),
 };
 
 const MAX_IMAGE_UPLOAD_BYTES = 20 * 1024 * 1024;
-const UPLOADABLE_IMAGE_EXTENSIONS = new Set([".gif", ".jpeg", ".jpg", ".png"]);
-
 const execFileAsync = promisify(execFile);
+
+const FORMATTER_SETTINGS: Record<Exclude<FormatterChoice, "none">, FormatterSettings> = {
+  prettier: {
+    command: "prettier",
+    displayName: "Prettier",
+    baseArgs: ["--write"],
+    configFlag: "--config",
+  },
+  biome: {
+    command: "@biomejs/biome",
+    displayName: "Biome",
+    baseArgs: ["format", "--write"],
+    configFlag: "--config-path",
+  },
+};
 
 function createLogContext(prefix?: string): LogContext {
   if (!prefix) {
@@ -172,13 +192,15 @@ async function run(): Promise<void> {
             log.info("Skipping sync: Notion is up to date.");
             pageUrl = pageUrl ?? notionPageUrl(pageId);
           } else {
-            const resolveLink = (href: string) =>
-              resolveRelativeLink(href, doc.absPath, docsFolderPath, workspaceRoot, knownPageUrls);
-            const blocks = markdownToNotionBlocks(doc.body, {
-              resolveLink,
-              logger: (message) => log.info(message),
-            });
-            await uploadImageBlocks(notion, blocks, githubToken, log);
+            const blocks = await buildBlocksForDoc(
+              notion,
+              doc,
+              docsFolderPath,
+              workspaceRoot,
+              knownPageUrls,
+              githubToken,
+              log,
+            );
             try {
               await updatePageContent(notion, pageId, effectiveTitle, blocks, log);
               pageUrl = notionPageUrl(pageId);
@@ -195,13 +217,15 @@ async function run(): Promise<void> {
         }
 
         if (!pageId) {
-          const resolveLink = (href: string) =>
-            resolveRelativeLink(href, doc.absPath, docsFolderPath, workspaceRoot, knownPageUrls);
-          const blocks = markdownToNotionBlocks(doc.body, {
-            resolveLink,
-            logger: (message) => log.info(message),
-          });
-          await uploadImageBlocks(notion, blocks, githubToken, log);
+          const blocks = await buildBlocksForDoc(
+            notion,
+            doc,
+            docsFolderPath,
+            workspaceRoot,
+            knownPageUrls,
+            githubToken,
+            log,
+          );
           const pageParentId = pagesParentId;
           const created = await createPage(notion, pageParentId, effectiveTitle);
           pageId = normalizeNotionId(created.id);
@@ -375,6 +399,25 @@ function normalizeMappingKey(relPath: string): string {
   return relPath.replace(/\\/g, "/");
 }
 
+async function buildBlocksForDoc(
+  notion: Client,
+  doc: DocEntry,
+  docsFolderPath: string,
+  workspaceRoot: string,
+  knownPageUrls: Map<string, string>,
+  githubToken: string | null,
+  logContext: LogContext,
+): Promise<NotionBlock[]> {
+  const resolveLink = (href: string) =>
+    resolveRelativeLink(href, doc.absPath, docsFolderPath, workspaceRoot, knownPageUrls);
+  const blocks = markdownToNotionBlocks(doc.body, {
+    resolveLink,
+    logger: (message) => logContext.info(message),
+  });
+  await uploadImageBlocks(notion, blocks, githubToken, logContext);
+  return blocks;
+}
+
 async function readMappingFile(mappingFilePath: string): Promise<Map<string, MappingEntry>> {
   try {
     const content = await fs.readFile(mappingFilePath, "utf8");
@@ -457,25 +500,15 @@ function buildFormatterOption(
   formatterChoice: FormatterChoice,
   formatterConfigPath: string | null,
 ): FormatterOption {
-  if (formatterChoice === "prettier") {
-    const args = ["--write"];
+  const settings = FORMATTER_SETTINGS[formatterChoice as Exclude<FormatterChoice, "none">];
+  if (settings) {
+    const args = [...settings.baseArgs];
     if (formatterConfigPath) {
-      args.push("--config", formatterConfigPath);
+      args.push(settings.configFlag, formatterConfigPath);
     }
     return {
-      command: "prettier",
-      displayName: "Prettier",
-      formatArgs: args,
-    };
-  }
-  if (formatterChoice === "biome") {
-    const args = ["format", "--write"];
-    if (formatterConfigPath) {
-      args.push("--config-path", formatterConfigPath);
-    }
-    return {
-      command: "@biomejs/biome",
-      displayName: "Biome",
+      command: settings.command,
+      displayName: settings.displayName,
       formatArgs: args,
     };
   }
@@ -696,9 +729,8 @@ function buildGitHubRawUrl(repoRelativePath: string): string | null {
   return `${serverUrl}/raw/${ownerRepo}/${ref}/${normalizedPath}`;
 }
 
-type GitHubRawLocation = {
-  ownerRepo: string;
-  ref: string;
+type GitHubContentsRequest = {
+  url: string;
   path: string;
 };
 
@@ -710,80 +742,59 @@ type GitHubFile = {
   path: string;
 };
 
-function parseGitHubRawUrl(url: string): GitHubRawLocation | null {
+function getGitHubContentsRequestFromRawUrl(rawUrl: string): GitHubContentsRequest | null {
   let parsed: URL;
   try {
-    parsed = new URL(url);
+    parsed = new URL(rawUrl);
   } catch {
     return null;
   }
+
+  let ownerRepo: string | null = null;
+  let ref: string | null = null;
+  let filePath: string | null = null;
 
   if (parsed.hostname === "raw.githubusercontent.com") {
     const segments = parsed.pathname.split("/").filter(Boolean);
     if (segments.length < 4) {
       return null;
     }
-    return {
-      ownerRepo: `${segments[0]}/${segments[1]}`,
-      ref: segments[2],
-      path: segments.slice(3).join("/"),
-    };
+    ownerRepo = `${segments[0]}/${segments[1]}`;
+    ref = segments[2];
+    filePath = segments.slice(3).join("/");
+  } else {
+    const serverUrl = (process.env.GITHUB_SERVER_URL || "https://github.com").replace(/\/+$/, "");
+    if (parsed.origin !== serverUrl) {
+      return null;
+    }
+    const segments = parsed.pathname.split("/").filter(Boolean);
+    if (segments.length < 5 || segments[0] !== "raw") {
+      return null;
+    }
+    ownerRepo = `${segments[1]}/${segments[2]}`;
+    ref = segments[3];
+    filePath = segments.slice(4).join("/");
   }
 
-  const serverUrl = (process.env.GITHUB_SERVER_URL || "https://github.com").replace(/\/+$/, "");
-  if (parsed.origin !== serverUrl) {
+  if (!ownerRepo || !ref || !filePath) {
     return null;
   }
-  const segments = parsed.pathname.split("/").filter(Boolean);
-  if (segments.length < 5 || segments[0] !== "raw") {
-    return null;
-  }
+
+  const apiBase = (process.env.GITHUB_API_URL || "https://api.github.com").replace(/\/+$/, "");
+  const encodedPath = filePath.split("/").map(encodeURIComponent).join("/");
+  const encodedRef = encodeURIComponent(ref);
   return {
-    ownerRepo: `${segments[1]}/${segments[2]}`,
-    ref: segments[3],
-    path: segments.slice(4).join("/"),
+    url: `${apiBase}/repos/${ownerRepo}/contents/${encodedPath}?ref=${encodedRef}`,
+    path: filePath,
   };
 }
 
-function buildGitHubContentsUrl(location: GitHubRawLocation): string | null {
-  const apiBase = (process.env.GITHUB_API_URL || "https://api.github.com").replace(/\/+$/, "");
-  if (!apiBase) {
-    return null;
-  }
-  const encodedPath = location.path.split("/").map(encodeURIComponent).join("/");
-  const encodedRef = encodeURIComponent(location.ref);
-  return `${apiBase}/repos/${location.ownerRepo}/contents/${encodedPath}?ref=${encodedRef}`;
-}
-
-function getImageContentTypeFromExtension(extension: string): string | null {
-  switch (extension.toLowerCase()) {
-    case ".gif":
-      return "image/gif";
-    case ".jpeg":
-    case ".jpg":
-      return "image/jpeg";
-    case ".png":
-      return "image/png";
-    default:
-      return null;
-  }
-}
-
-function isUploadableImageExtension(extension: string): boolean {
-  return UPLOADABLE_IMAGE_EXTENSIONS.has(extension.toLowerCase());
-}
-
 async function fetchGitHubFile(
-  location: GitHubRawLocation,
+  request: GitHubContentsRequest,
   githubToken: string | null,
+  fallbackContentType: string,
   logContext: LogContext,
 ): Promise<GitHubFile | null> {
-  const url = buildGitHubContentsUrl(location);
-  if (!url) {
-    logContext.warn(`Skipping image ${location.path}: GitHub API base URL not available.`);
-    return null;
-  }
-
   const headers: Record<string, string> = {
     Accept: "application/vnd.github.raw+json",
     "X-GitHub-Api-Version": "2022-11-28",
@@ -792,9 +803,9 @@ async function fetchGitHubFile(
     headers.Authorization = `Bearer ${githubToken}`;
   }
 
-  const response = await fetch(url, { headers });
+  const response = await fetch(request.url, { headers });
   if (!response.ok) {
-    logContext.warn(`Skipping image ${location.path}: GitHub fetch failed (${response.status}).`);
+    logContext.warn(`Skipping image ${request.path}: GitHub fetch failed (${response.status}).`);
     return null;
   }
 
@@ -802,9 +813,7 @@ async function fetchGitHubFile(
   if (contentLengthHeader) {
     const contentLength = Number(contentLengthHeader);
     if (Number.isFinite(contentLength) && contentLength > MAX_IMAGE_UPLOAD_BYTES) {
-      logContext.warn(
-        `Skipping image ${location.path}: file size ${contentLength} exceeds 20MB limit.`,
-      );
+      logContext.warn(`Skipping image ${request.path}: file size ${contentLength} exceeds 20MB.`);
       return null;
     }
   }
@@ -812,19 +821,16 @@ async function fetchGitHubFile(
   const arrayBuffer = await response.arrayBuffer();
   const buffer = Buffer.from(arrayBuffer);
   if (buffer.length > MAX_IMAGE_UPLOAD_BYTES) {
-    logContext.warn(
-      `Skipping image ${location.path}: file size ${buffer.length} exceeds 20MB limit.`,
-    );
+    logContext.warn(`Skipping image ${request.path}: file size ${buffer.length} exceeds 20MB.`);
     return null;
   }
 
   const headerContentType = response.headers.get("content-type") || "";
-  const extension = path.extname(location.path).toLowerCase();
   const contentType = headerContentType.startsWith("image/")
     ? headerContentType
-    : getImageContentTypeFromExtension(extension);
+    : fallbackContentType;
   if (!contentType) {
-    logContext.warn(`Skipping image ${location.path}: unsupported content type.`);
+    logContext.warn(`Skipping image ${request.path}: unsupported content type.`);
     return null;
   }
 
@@ -832,8 +838,8 @@ async function fetchGitHubFile(
     buffer,
     contentType,
     size: buffer.length,
-    filename: path.basename(location.path),
-    path: location.path,
+    filename: path.basename(request.path),
+    path: request.path,
   };
 }
 
@@ -866,17 +872,17 @@ async function uploadImageBlock(
     return;
   }
 
-  const location = parseGitHubRawUrl(image.external.url);
-  if (!location) {
+  const request = getGitHubContentsRequestFromRawUrl(image.external.url);
+  if (!request) {
     return;
   }
 
-  const extension = path.extname(location.path).toLowerCase();
-  if (!isUploadableImageExtension(extension)) {
+  const fallbackContentType = getUploadableImageContentType(request.path);
+  if (!fallbackContentType) {
     return;
   }
 
-  const file = await fetchGitHubFile(location, githubToken, logContext);
+  const file = await fetchGitHubFile(request, githubToken, fallbackContentType, logContext);
   if (!file) {
     return;
   }
@@ -920,6 +926,20 @@ async function uploadImageBlock(
     file_upload: { id: uploadId },
     ...(caption ? { caption } : {}),
   };
+}
+
+function getUploadableImageContentType(filePath: string): string | null {
+  switch (path.extname(filePath).toLowerCase()) {
+    case ".gif":
+      return "image/gif";
+    case ".jpeg":
+    case ".jpg":
+      return "image/jpeg";
+    case ".png":
+      return "image/png";
+    default:
+      return null;
+  }
 }
 
 function normalizeNotionId(input: string): string {
