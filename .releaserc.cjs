@@ -1,5 +1,5 @@
 module.exports = {
-  branches: [{ name: "main", range: "1.x" }],
+  branches: ["main"],
   tagFormat: "v${version}",
   plugins: [
     [
