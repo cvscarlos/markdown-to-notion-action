@@ -64,6 +64,10 @@ jobs:
           commit_strategy: pr
           # Optional: prefix for the PR branch (default: auto-notion-sync/)
           pr_branch_prefix: "auto-notion-sync/"
+          # Optional: formatter for _notion_links.md (prettier | biome | none)
+          formatter: "prettier"
+          # Optional: formatter config path (relative to repo root)
+          formatter_config: ".prettierrc.json"
 ```
 
 Example using `page_block_id` only:
@@ -116,6 +120,8 @@ jobs:
 | `title_prefix_separator` | No       | Separator used between folder names and the title. Default: `→`.                                                  |
 | `commit_strategy`        | No       | How to persist `notion_page_id` updates: `pr` (default), `push`, or `none`.                                       |
 | `pr_branch_prefix`       | No       | Prefix for the PR branch when `commit_strategy=pr`. Default: `auto-notion-sync/`.                                 |
+| `formatter`              | No       | Formatter for `_notion_links.md`: `prettier` (default), `biome`, or `none`.                                       |
+| `formatter_config`       | No       | Optional formatter config path (relative to repo root).                                                           |
 | `github_token`           | No       | Required when `commit_strategy` is `push` or `pr`. Used to push commits or open PRs for `notion_page_id` updates. |
 
 **Requirement:** You must provide either `page_block_id` **or** `page_id`.

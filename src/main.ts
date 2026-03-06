@@ -58,6 +58,8 @@ type SyncDecision = {
   archivedOrMissing: boolean;
 };
 
+type FormatterChoice = "biome" | "none" | "prettier";
+
 type FormatterOption = {
   command: string;
   displayName: string;
@@ -128,6 +130,11 @@ async function run(): Promise<void> {
     }
     const titlePrefixSeparator = normalizeTitlePrefixSeparator(titlePrefixSeparatorInput);
     const prBranchPrefix = normalizePrBranchPrefix(prBranchPrefixInput);
+    const formatterChoice = normalizeFormatterChoice(readInput("formatter", ["FORMATTER"]));
+    const formatterConfigPath = resolveFormatterConfigPath(
+      readInput("formatter_config", ["FORMATTER_CONFIG"]),
+      workspaceRoot,
+    );
 
     const markdownFiles = await collectMarkdownFiles(docsFolderPath, mappingFilePath);
     if (markdownFiles.length === 0) {
@@ -247,7 +254,12 @@ async function run(): Promise<void> {
     if (mappingDirty) {
       await writeMappingFile(mappingFilePath, mappingEntries);
       if (commitStrategy !== "none") {
-        await formatMappingFileIfFormatterAvailable(mappingFilePath, workspaceRoot);
+        await formatMappingFileIfFormatterAvailable(
+          mappingFilePath,
+          workspaceRoot,
+          formatterChoice,
+          formatterConfigPath,
+        );
       }
       changedFiles.push(path.relative(workspaceRoot, mappingFilePath));
     }
@@ -318,6 +330,22 @@ function normalizeTitlePrefixSeparator(value: string): string {
     return "→";
   }
   return trimmed;
+}
+
+function normalizeFormatterChoice(value: string): FormatterChoice {
+  const normalized = value.trim().toLowerCase() || "prettier";
+  if (["prettier", "biome", "none"].includes(normalized)) {
+    return normalized as FormatterChoice;
+  }
+  throw new Error(`Invalid formatter: ${value}. Use 'prettier', 'biome', or 'none'.`);
+}
+
+function resolveFormatterConfigPath(value: string, workspaceRoot: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  return path.isAbsolute(trimmed) ? trimmed : path.resolve(workspaceRoot, trimmed);
 }
 
 function normalizePrBranchPrefix(value: string): string {
@@ -402,48 +430,64 @@ async function writeMappingFile(
 async function formatMappingFileIfFormatterAvailable(
   mappingFilePath: string,
   workspaceRoot: string,
+  formatterChoice: FormatterChoice,
+  formatterConfigPath: string | null,
 ): Promise<void> {
-  core.info(`Formatting mapping file: ${mappingFilePath}`);
-  const formatters: FormatterOption[] = [
-    {
-      command: "prettier",
-      displayName: "Prettier",
-      formatArgs: ["--write"],
-    },
-    {
-      command: "@biomejs/biome",
-      displayName: "Biome",
-      formatArgs: ["format", "--write"],
-    },
-  ];
-
-  for (const formatter of formatters) {
-    if (!(await isFormatterAvailable(formatter.command, workspaceRoot))) {
-      core.info(`${formatter.displayName} not available in caller workspace.`);
-      continue;
-    }
-
-    core.info(`Formatting mapping file with ${formatter.displayName}...`);
-    const result = await runFormatterCommand(
-      [formatter.command, ...formatter.formatArgs, mappingFilePath],
-      workspaceRoot,
-    );
-    if (result.success) {
-      core.info(`Formatted mapping file with ${formatter.displayName}.`);
-      return;
-    }
-    const errorSuffix = result.error ? ` (${result.error})` : "";
-    core.warning(`${formatter.displayName} is installed but failed to format${errorSuffix}.`);
+  if (formatterChoice === "none") {
+    core.info("Formatter disabled. Skipping mapping file formatting.");
+    return;
   }
 
-  core.info("No supported formatter found in caller workspace (checked: Prettier, Biome).");
+  const formatter = buildFormatterOption(formatterChoice, formatterConfigPath);
+  core.info(`Formatting mapping file with ${formatter.displayName}: ${mappingFilePath}`);
+  if (formatterConfigPath) {
+    core.info(`Using ${formatter.displayName} config: ${formatterConfigPath}`);
+  }
+
+  const result = await runFormatterCommand(formatter, mappingFilePath, workspaceRoot);
+  if (result.success) {
+    core.info(`Formatted mapping file with ${formatter.displayName}.`);
+    return;
+  }
+  const errorSuffix = result.error ? ` (${result.error})` : "";
+  core.warning(`${formatter.displayName} failed to format${errorSuffix}.`);
+}
+
+function buildFormatterOption(
+  formatterChoice: FormatterChoice,
+  formatterConfigPath: string | null,
+): FormatterOption {
+  if (formatterChoice === "prettier") {
+    const args = ["--write"];
+    if (formatterConfigPath) {
+      args.push("--config", formatterConfigPath);
+    }
+    return {
+      command: "prettier",
+      displayName: "Prettier",
+      formatArgs: args,
+    };
+  }
+  if (formatterChoice === "biome") {
+    const args = ["format", "--write"];
+    if (formatterConfigPath) {
+      args.push("--config-path", formatterConfigPath);
+    }
+    return {
+      command: "@biomejs/biome",
+      displayName: "Biome",
+      formatArgs: args,
+    };
+  }
+  throw new Error(`Unsupported formatter selection: ${formatterChoice}`);
 }
 
 async function runFormatterCommand(
-  args: string[],
+  formatter: FormatterOption,
+  mappingFilePath: string,
   workspaceRoot: string,
 ): Promise<{ success: boolean; error?: string }> {
-  const commandArgs = ["--no-install", ...args];
+  const commandArgs = ["--yes", formatter.command, ...formatter.formatArgs, mappingFilePath];
   try {
     await execFileAsync("npx", commandArgs, {
       cwd: workspaceRoot,
@@ -453,18 +497,6 @@ async function runFormatterCommand(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return { success: false, error: message };
-  }
-}
-
-async function isFormatterAvailable(formatter: string, workspaceRoot: string): Promise<boolean> {
-  try {
-    await execFileAsync("npx", ["--no-install", formatter, "--version"], {
-      cwd: workspaceRoot,
-      env: process.env,
-    });
-    return true;
-  } catch {
-    return false;
   }
 }
 
