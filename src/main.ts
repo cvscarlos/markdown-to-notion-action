@@ -108,6 +108,9 @@ function createLogContext(prefix?: string): LogContext {
 
 async function run(): Promise<void> {
   try {
+    const actionRef = process.env.GITHUB_ACTION_REF || "unknown";
+    const actionRepo = process.env.GITHUB_ACTION_REPOSITORY || "unknown";
+    core.info(`Action source: ${actionRepo}@${actionRef}`);
     const notionToken = readInput("notion_token", ["NOTION_TOKEN"]);
     const docsFolder = readInput("docs_folder", ["DOCS_FOLDER"]);
     const mappingFileInput = readInput("notion_mapping_file", ["NOTION_MAPPING_FILE"]);
