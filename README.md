@@ -189,6 +189,12 @@ If new pages are created (or page mappings change), the action persists the upda
 - `none`: skips any git updates.
 - Uses the provided `github_token` for push/PR operations.
 
+## Version Tags
+
+This repository uses Git tags for versions. GitHub does not always show tag labels on the commits list, so use the Tags page to find the latest version:
+
+- GitHub → **Releases → Tags** or **Code → Tags**
+
 ## Notion ID Tips
 
 You can pass a block/page ID **or** a Notion URL. The action extracts the ID automatically.
