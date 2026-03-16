@@ -1,5 +1,7 @@
 name: "Markdown to Notion"
 description: "Syncs Markdown files to Notion pages and updates an index block."
+icon: "book"
+color: "purple"
 
 inputs:
   notion_token:
