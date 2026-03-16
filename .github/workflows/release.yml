@@ -28,3 +28,23 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npx semantic-release
+
+      - name: Update floating v1 tag
+        run: |
+          latest_v1_tag="$(git tag --list 'v1.*' --sort=-v:refname | head -n 1)"
+          if [ -z "$latest_v1_tag" ]; then
+            echo "No v1.x.x tag found. Skipping floating v1 tag update."
+            exit 0
+          fi
+
+          target_sha="$(git rev-list -n 1 "$latest_v1_tag")"
+          current_sha="$(git rev-parse -q --verify refs/tags/v1^{commit} || true)"
+
+          if [ "$current_sha" = "$target_sha" ]; then
+            echo "v1 already points to $latest_v1_tag ($target_sha)."
+            exit 0
+          fi
+
+          git tag -f v1 "$target_sha"
+          git push --force origin refs/tags/v1
+          echo "Updated v1 to point to $latest_v1_tag ($target_sha)."
