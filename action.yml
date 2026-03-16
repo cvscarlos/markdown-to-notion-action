@@ -64,6 +64,8 @@ runs:
       shell: bash
       working-directory: ${{ github.action_path }}
       env:
+        ACTION_SOURCE_REPOSITORY: ${{ github.action_repository }}
+        ACTION_SOURCE_REF: ${{ github.action_ref }}
         INPUT_NOTION_TOKEN: ${{ inputs.notion_token }}
         INPUT_DOCS_FOLDER: ${{ inputs.docs_folder }}
         INPUT_NOTION_MAPPING_FILE: ${{ inputs.notion_mapping_file }}
