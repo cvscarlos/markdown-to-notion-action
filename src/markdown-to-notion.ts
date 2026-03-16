@@ -9,7 +9,7 @@ export type MarkdownToNotionOptions = {
   logger?: Logger;
 };
 
-const md = new MarkdownIt({
+const markdownParser = new MarkdownIt({
   html: false,
   linkify: true,
 });
@@ -22,7 +22,7 @@ const TABLE_OF_CONTENTS_LABELS = new Set([
 ]);
 
 export function extractTitle(markdown: string): string | null {
-  const tokens = md.parse(markdown, {});
+  const tokens = markdownParser.parse(markdown, {});
   for (let i = 0; i < tokens.length; i += 1) {
     const token = tokens[i];
     if (token.type === "heading_open" && token.tag === "h1") {

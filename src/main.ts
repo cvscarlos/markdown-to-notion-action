@@ -2,7 +2,7 @@ import * as core from "@actions/core";
 import * as github from "@actions/github";
 import { Client } from "@notionhq/client";
 import { execFile } from "child_process";
-import * as fm from "front-matter";
+import * as frontMatter from "front-matter";
 import * as fs from "fs/promises";
 import * as path from "path";
 import { promisify } from "util";
@@ -23,12 +23,14 @@ type BlockUpdateRequest = Parameters<Client["blocks"]["update"]>[0];
 type CalloutUpdateRequest = Extract<BlockUpdateRequest, { callout: unknown }>;
 type CalloutIconRequest = CalloutUpdateRequest["callout"] extends { icon?: infer T } ? T : never;
 type FrontMatterResult<T> = { attributes: T; body: string };
-type FrontMatterFn = <T>(file: string, options?: { allowUnsafe?: boolean }) => FrontMatterResult<T>;
+type FrontMatterParser = <T>(
+  file: string,
+  options?: { allowUnsafe?: boolean },
+) => FrontMatterResult<T>;
 
-type DocEntry = {
+type MarkdownDocument = {
   absPath: string;
   relPath: string;
-  rawContent: string;
   body: string;
   attributes: Record<string, unknown>;
   title: string;
@@ -165,12 +167,12 @@ async function run(): Promise<void> {
     }
 
     const mappingEntries = await readMappingFile(mappingFilePath);
-    const documents = await loadDocuments(markdownFiles, docsFolderPath, mappingEntries);
+    const documents = await loadMarkdownDocuments(markdownFiles, docsFolderPath, mappingEntries);
 
     const knownPageUrls = new Map<string, string>();
-    for (const doc of documents) {
-      if (doc.notionPageId) {
-        knownPageUrls.set(doc.absPath, notionPageUrl(doc.notionPageId));
+    for (const documentEntry of documents) {
+      if (documentEntry.notionPageId) {
+        knownPageUrls.set(documentEntry.absPath, notionPageUrl(documentEntry.notionPageId));
       }
     }
 
@@ -178,92 +180,98 @@ async function run(): Promise<void> {
     const syncedPages: SyncedPage[] = [];
     let mappingDirty = false;
 
-    for (const doc of documents) {
+    for (const documentEntry of documents) {
       try {
-        const log = createLogContext(doc.relPath);
-        log.info(`Sync start: ${doc.title}`);
-        const effectiveTitle = buildTitleWithSeparator(doc, titlePrefixSeparator);
-        let pageId = doc.notionPageId;
-        let pageUrl = doc.notionUrl;
-        let didSync = false;
+        const documentLog = createLogContext(documentEntry.relPath);
+        documentLog.info(`Sync start: ${documentEntry.title}`);
+        const pageTitle = buildNotionPageTitle(documentEntry, titlePrefixSeparator);
+        let pageId = documentEntry.notionPageId;
+        let pageUrl = documentEntry.notionUrl;
+        let pageWasWritten = false;
         if (pageId) {
-          const decision = await getSyncDecision(notion, pageId, doc.absPath, workspaceRoot, log);
+          const decision = await getSyncDecision(
+            notion,
+            pageId,
+            documentEntry.absPath,
+            workspaceRoot,
+            documentLog,
+          );
           if (decision.archivedOrMissing) {
-            log.warn(`Notion page missing or archived, recreating: ${effectiveTitle}`);
+            documentLog.warn(`Notion page missing or archived, recreating: ${pageTitle}`);
             pageId = undefined;
           } else if (decision.skipSync) {
-            log.info("Skipping sync: Notion is up to date.");
+            documentLog.info("Skipping sync: Notion is up to date.");
             pageUrl = pageUrl ?? notionPageUrl(pageId);
           } else {
-            const blocks = await buildBlocksForDoc(
+            const blocks = await buildBlocksForDocument(
               notion,
-              doc,
+              documentEntry,
               docsFolderPath,
               workspaceRoot,
               knownPageUrls,
               githubToken,
-              log,
+              documentLog,
             );
             try {
-              await updatePageContent(notion, pageId, effectiveTitle, blocks, log);
+              await updatePageContent(notion, pageId, pageTitle, blocks, documentLog);
               pageUrl = notionPageUrl(pageId);
-              didSync = true;
-              log.info(`Updated page: ${effectiveTitle}`);
+              pageWasWritten = true;
+              documentLog.info(`Updated page: ${pageTitle}`);
             } catch (error) {
               if (!isNotionNotFoundError(error) && !isNotionArchivedError(error)) {
                 throw error;
               }
-              log.warn(`Notion page missing or archived, recreating: ${effectiveTitle}`);
+              documentLog.warn(`Notion page missing or archived, recreating: ${pageTitle}`);
               pageId = undefined;
             }
           }
         }
 
         if (!pageId) {
-          const blocks = await buildBlocksForDoc(
+          const blocks = await buildBlocksForDocument(
             notion,
-            doc,
+            documentEntry,
             docsFolderPath,
             workspaceRoot,
             knownPageUrls,
             githubToken,
-            log,
+            documentLog,
           );
           const pageParentId = pagesParentId;
-          const created = await createPage(notion, pageParentId, effectiveTitle);
+          const created = await createPage(notion, pageParentId, pageTitle);
           pageId = normalizeNotionId(created.id);
           pageUrl = created.url || notionPageUrl(pageId);
-          log.info(`Created page: ${effectiveTitle}`);
+          documentLog.info(`Created page: ${pageTitle}`);
           if (pageUrl) {
-            log.info(`Page URL: ${pageUrl}`);
+            documentLog.info(`Page URL: ${pageUrl}`);
           }
-          await appendBlocksSafe(notion, pageId, blocks, log);
-          didSync = true;
+          await appendBlocksSafe(notion, pageId, blocks, documentLog);
+          pageWasWritten = true;
         }
 
         if (pageId && pageUrl) {
-          knownPageUrls.set(doc.absPath, pageUrl);
-          const mappingKey = normalizeMappingKey(doc.relPath);
+          knownPageUrls.set(documentEntry.absPath, pageUrl);
+          const mappingKey = normalizeMappingKey(documentEntry.relPath);
           const normalizedId = normalizeNotionId(pageId);
-          const existing = mappingEntries.get(mappingKey);
-          if (!existing || normalizeNotionId(existing.pageId) !== normalizedId) {
+          const existingMapping = mappingEntries.get(mappingKey);
+          if (!existingMapping || normalizeNotionId(existingMapping.pageId) !== normalizedId) {
             mappingEntries.set(mappingKey, {
               pageId: normalizedId,
-              title: didSync ? effectiveTitle : (existing?.title ?? effectiveTitle),
+              title: pageWasWritten ? pageTitle : (existingMapping?.title ?? pageTitle),
             });
             mappingDirty = true;
-          } else if (didSync && existing.title !== effectiveTitle) {
-            mappingEntries.set(mappingKey, { pageId: normalizedId, title: effectiveTitle });
+          } else if (pageWasWritten && existingMapping.title !== pageTitle) {
+            mappingEntries.set(mappingKey, { pageId: normalizedId, title: pageTitle });
             mappingDirty = true;
           }
           syncedPages.push({
             pageId,
-            title: effectiveTitle,
+            title: pageTitle,
           });
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        core.warning(`Failed to sync ${doc.relPath}: ${message}`);
+        core.warning(`Failed to sync ${documentEntry.relPath}: ${message}`);
       }
     }
 
@@ -324,14 +332,17 @@ function isNotionNotFoundError(error: unknown): boolean {
   if (!error || typeof error !== "object") {
     return false;
   }
-  const err = error as { code?: string; status?: number; message?: string };
-  if (err.code === "object_not_found") {
+  const errorDetails = error as { code?: string; status?: number; message?: string };
+  if (errorDetails.code === "object_not_found") {
     return true;
   }
-  if (err.status === 404) {
+  if (errorDetails.status === 404) {
     return true;
   }
-  if (typeof err.message === "string" && err.message.toLowerCase().includes("not found")) {
+  if (
+    typeof errorDetails.message === "string" &&
+    errorDetails.message.toLowerCase().includes("not found")
+  ) {
     return true;
   }
   return false;
@@ -341,14 +352,14 @@ function isNotionArchivedError(error: unknown): boolean {
   if (!error || typeof error !== "object") {
     return false;
   }
-  const err = error as { code?: string; message?: string };
-  if (err.code !== "validation_error") {
+  const errorDetails = error as { code?: string; message?: string };
+  if (errorDetails.code !== "validation_error") {
     return false;
   }
-  if (typeof err.message !== "string") {
+  if (typeof errorDetails.message !== "string") {
     return false;
   }
-  return err.message.toLowerCase().includes("archived");
+  return errorDetails.message.toLowerCase().includes("archived");
 }
 
 function normalizeTitlePrefixSeparator(value: string): string {
@@ -402,19 +413,19 @@ function normalizeMappingKey(relPath: string): string {
   return relPath.replace(/\\/g, "/");
 }
 
-async function buildBlocksForDoc(
+async function buildBlocksForDocument(
   notion: Client,
-  doc: DocEntry,
+  documentEntry: MarkdownDocument,
   docsFolderPath: string,
   workspaceRoot: string,
   knownPageUrls: Map<string, string>,
   githubToken: string | null,
   logContext: LogContext,
 ): Promise<NotionBlock[]> {
-  const resolveLink = (href: string) =>
-    resolveRelativeLink(href, doc.absPath, docsFolderPath, workspaceRoot, knownPageUrls);
-  const blocks = markdownToNotionBlocks(doc.body, {
-    resolveLink,
+  const resolveMarkdownLink = (href: string) =>
+    resolveRelativeLink(href, documentEntry.absPath, docsFolderPath, workspaceRoot, knownPageUrls);
+  const blocks = markdownToNotionBlocks(documentEntry.body, {
+    resolveLink: resolveMarkdownLink,
     logger: (message) => logContext.info(message),
   });
   await uploadImageBlocks(notion, blocks, githubToken, logContext);
@@ -457,8 +468,8 @@ async function readMappingFile(mappingFilePath: string): Promise<Map<string, Map
     }
     return entries;
   } catch (error) {
-    const err = error as { code?: string };
-    if (err.code === "ENOENT") {
+    const errorDetails = error as { code?: string };
+    if (errorDetails.code === "ENOENT") {
       return new Map();
     }
     throw error;
@@ -638,44 +649,45 @@ async function collectMarkdownFiles(dirPath: string, mappingFilePath: string): P
   return files;
 }
 
-async function loadDocuments(
+async function loadMarkdownDocuments(
   markdownFiles: string[],
   docsRoot: string,
   mapping: Map<string, MappingEntry>,
-): Promise<DocEntry[]> {
-  const documents: DocEntry[] = [];
+): Promise<MarkdownDocument[]> {
+  const documents: MarkdownDocument[] = [];
   for (const filePath of markdownFiles) {
-    const rawContent = await fs.readFile(filePath, "utf8");
-    const parsed = (fm.default as unknown as FrontMatterFn)<Record<string, unknown>>(rawContent);
-    const attributes = parsed.attributes || {};
-    const body = parsed.body || "";
+    const markdownContent = await fs.readFile(filePath, "utf8");
+    const parsedFrontMatter = (frontMatter.default as unknown as FrontMatterParser)<
+      Record<string, unknown>
+    >(markdownContent);
+    const frontMatterAttributes = parsedFrontMatter.attributes || {};
+    const markdownBody = parsedFrontMatter.body || "";
 
     const relPath = normalizeMappingKey(path.relative(docsRoot, filePath));
     let notionPageId: string | undefined;
-    const mapped = mapping.get(relPath);
-    if (mapped?.pageId) {
-      notionPageId = normalizeNotionId(mapped.pageId);
+    const mappedEntry = mapping.get(relPath);
+    if (mappedEntry?.pageId) {
+      notionPageId = normalizeNotionId(mappedEntry.pageId);
     } else if (
-      typeof attributes.notion_page_id === "string" &&
-      attributes.notion_page_id.trim().length > 0
+      typeof frontMatterAttributes.notion_page_id === "string" &&
+      frontMatterAttributes.notion_page_id.trim().length > 0
     ) {
       try {
-        notionPageId = normalizeNotionId(attributes.notion_page_id);
+        notionPageId = normalizeNotionId(frontMatterAttributes.notion_page_id);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         core.warning(`Invalid notion_page_id in ${filePath}: ${message}`);
       }
     }
 
-    const titleFromMarkdown = extractTitle(body);
-    const title = titleFromMarkdown || path.basename(filePath, ".md");
+    const extractedTitle = extractTitle(markdownBody);
+    const title = extractedTitle || path.basename(filePath, ".md");
 
     documents.push({
       absPath: filePath,
       relPath: relPath,
-      rawContent,
-      body,
-      attributes,
+      body: markdownBody,
+      attributes: frontMatterAttributes,
       title,
       notionPageId,
       notionUrl: notionPageId ? notionPageUrl(notionPageId) : undefined,
@@ -795,7 +807,7 @@ function getGitHubContentsRequestFromRawUrl(rawUrl: string): GitHubContentsReque
 async function fetchGitHubFile(
   request: GitHubContentsRequest,
   githubToken: string | null,
-  fallbackContentType: string,
+  expectedContentType: string,
   logContext: LogContext,
 ): Promise<GitHubFile | null> {
   const headers: Record<string, string> = {
@@ -831,7 +843,7 @@ async function fetchGitHubFile(
   const headerContentType = response.headers.get("content-type") || "";
   const contentType = headerContentType.startsWith("image/")
     ? headerContentType
-    : fallbackContentType;
+    : expectedContentType;
   if (!contentType) {
     logContext.warn(`Skipping image ${request.path}: unsupported content type.`);
     return null;
@@ -844,6 +856,27 @@ async function fetchGitHubFile(
     filename: path.basename(request.path),
     path: request.path,
   };
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function runStepWithLogging<T>(
+  logContext: LogContext,
+  startMessage: string,
+  successMessage: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  logContext.info(startMessage);
+  try {
+    const result = await operation();
+    logContext.info(successMessage);
+    return result;
+  } catch (error) {
+    logContext.warn(`${startMessage} Failed: ${describeError(error)}`);
+    throw error instanceof Error ? error : new Error(String(error));
+  }
 }
 
 async function uploadImageBlocks(
@@ -875,52 +908,76 @@ async function uploadImageBlock(
     return;
   }
 
-  const request = getGitHubContentsRequestFromRawUrl(image.external.url);
-  if (!request) {
+  const githubContentsRequest = getGitHubContentsRequestFromRawUrl(image.external.url);
+  if (!githubContentsRequest) {
+    logContext.info(`Skipping image ${image.external.url}: not a supported GitHub raw URL.`);
     return;
   }
 
-  const fallbackContentType = getUploadableImageContentType(request.path);
-  if (!fallbackContentType) {
+  const expectedImageContentType = getUploadableImageContentType(githubContentsRequest.path);
+  if (!expectedImageContentType) {
+    logContext.info(
+      `Skipping image ${githubContentsRequest.path}: only PNG, JPG, JPEG, and GIF are uploaded.`,
+    );
     return;
   }
 
-  const file = await fetchGitHubFile(request, githubToken, fallbackContentType, logContext);
-  if (!file) {
+  const imageFile = await runStepWithLogging(
+    logContext,
+    `Starting GitHub image fetch for ${githubContentsRequest.path}.`,
+    `Finished GitHub image fetch for ${githubContentsRequest.path}.`,
+    () => fetchGitHubFile(githubContentsRequest, githubToken, expectedImageContentType, logContext),
+  );
+  if (!imageFile) {
+    logContext.info(
+      `Skipping image ${githubContentsRequest.path}: GitHub fetch returned no uploadable file.`,
+    );
     return;
   }
 
-  logContext.info(`Uploading image ${file.path} (${file.size} bytes)...`);
+  logContext.info(`Starting Notion image upload for ${imageFile.path} (${imageFile.size} bytes).`);
   /**
    * Notion API: Create a file upload
    * https://developers.notion.com/reference/create-a-file-upload.md
    */
-  const upload = await notionRequest(
+  const fileUpload = await runStepWithLogging(
+    logContext,
+    `Starting Notion file upload creation for ${imageFile.filename}.`,
+    `Finished Notion file upload creation for ${imageFile.filename}.`,
     () =>
-      notion.fileUploads.create({
-        mode: "single_part",
-        filename: file.filename,
-        content_type: file.contentType,
-      }),
-    `fileUploads.create ${file.filename}`,
+      notionRequest(
+        () =>
+          notion.fileUploads.create({
+            mode: "single_part",
+            filename: imageFile.filename,
+            content_type: imageFile.contentType,
+          }),
+        `fileUploads.create ${imageFile.filename}`,
+      ),
   );
-  const uploadId = upload.id;
+  const uploadId = fileUpload.id;
 
-  const blob = new Blob([new Uint8Array(file.buffer)], { type: file.contentType });
+  const blob = new Blob([new Uint8Array(imageFile.buffer)], { type: imageFile.contentType });
   /**
    * Notion API: Send a file upload
    * https://developers.notion.com/reference/send-a-file-upload.md
    */
-  await notionRequest(
+  await runStepWithLogging(
+    logContext,
+    `Starting Notion file upload send for ${imageFile.filename}.`,
+    `Finished Notion file upload send for ${imageFile.filename}.`,
     () =>
-      notion.fileUploads.send({
-        file_upload_id: uploadId,
-        file: {
-          data: blob,
-          filename: file.filename,
-        },
-      }),
-    `fileUploads.send ${uploadId}`,
+      notionRequest(
+        () =>
+          notion.fileUploads.send({
+            file_upload_id: uploadId,
+            file: {
+              data: blob,
+              filename: imageFile.filename,
+            },
+          }),
+        `fileUploads.send ${uploadId}`,
+      ),
   );
 
   const caption = image.caption;
@@ -929,6 +986,7 @@ async function uploadImageBlock(
     file_upload: { id: uploadId },
     ...(caption ? { caption } : {}),
   };
+  logContext.info(`Image block now references Notion upload ${uploadId} for ${imageFile.path}.`);
 }
 
 function getUploadableImageContentType(filePath: string): string | null {
@@ -1116,15 +1174,15 @@ function buildTitleProperty(title: string): PageProperties {
   } as PageProperties;
 }
 
-function buildTitleWithSeparator(doc: DocEntry, separator: string): string {
-  const baseTitle = doc.title || "Untitled";
-  const folderPath = normalizeFolderPath(doc.relPath);
+function buildNotionPageTitle(documentEntry: MarkdownDocument, separator: string): string {
+  const baseTitle = documentEntry.title || "Untitled";
+  const folderPath = normalizeFolderPath(documentEntry.relPath);
   if (!folderPath) {
     return baseTitle;
   }
   const normalizedSeparator = separator.trim();
-  const delim = normalizedSeparator.length > 0 ? ` ${normalizedSeparator} ` : " ";
-  return `${folderPath.replace(/\//g, delim)}${delim}${baseTitle}`;
+  const separatorText = normalizedSeparator.length > 0 ? ` ${normalizedSeparator} ` : " ";
+  return `${folderPath.replace(/\//g, separatorText)}${separatorText}${baseTitle}`;
 }
 
 function normalizeFolderPath(relPath: string): string {
@@ -2203,13 +2261,13 @@ function toNotionBlockRequests(blocks: NotionBlock[]): AppendChildren {
   return blocks as unknown as AppendChildren;
 }
 
-async function notionRequest<T>(fn: () => Promise<T>, label: string): Promise<T> {
+async function notionRequest<T>(operation: () => Promise<T>, label: string): Promise<T> {
   const maxAttempts = 5;
   let attempt = 0;
   let lastError: unknown;
   while (attempt < maxAttempts) {
     try {
-      return await fn();
+      return await operation();
     } catch (error) {
       lastError = error;
       if (!isRateLimitError(error)) {
@@ -2228,18 +2286,21 @@ function isRateLimitError(error: unknown): boolean {
   if (!error || typeof error !== "object") {
     return false;
   }
-  const err = error as { code?: string; status?: number };
-  return err.code === "rate_limited" || err.status === 429;
+  const errorDetails = error as { code?: string; status?: number };
+  return errorDetails.code === "rate_limited" || errorDetails.status === 429;
 }
 
 function getRetryDelayMs(error: unknown, attempt: number): number {
-  const err = error as { body?: { retry_after?: number }; headers?: Record<string, string> };
-  const retryAfterHeader = err.headers?.["retry-after"];
+  const errorDetails = error as {
+    body?: { retry_after?: number };
+    headers?: Record<string, string>;
+  };
+  const retryAfterHeader = errorDetails.headers?.["retry-after"];
   const headerSeconds = retryAfterHeader ? Number.parseFloat(retryAfterHeader) : NaN;
   if (!Number.isNaN(headerSeconds) && headerSeconds > 0) {
     return Math.ceil(headerSeconds * 1000);
   }
-  const bodySeconds = err.body?.retry_after;
+  const bodySeconds = errorDetails.body?.retry_after;
   if (typeof bodySeconds === "number" && bodySeconds > 0) {
     return Math.ceil(bodySeconds * 1000);
   }

@@ -4,18 +4,18 @@ import { promisify } from "util";
 
 const execFileAsync = promisify(execFile);
 
-type ExecResult = { stdout: string; stderr: string };
+type CommandResult = { stdout: string; stderr: string };
 
 type Logger = (message: string) => void;
 
-async function runCommand(command: string, args: string[], cwd?: string): Promise<ExecResult> {
-  const result = await execFileAsync(command, args, {
+async function runCommand(command: string, args: string[], cwd?: string): Promise<CommandResult> {
+  const commandResult = await execFileAsync(command, args, {
     cwd,
     env: process.env,
   });
   return {
-    stdout: result.stdout?.toString() ?? "",
-    stderr: result.stderr?.toString() ?? "",
+    stdout: commandResult.stdout?.toString() ?? "",
+    stderr: commandResult.stderr?.toString() ?? "",
   };
 }
 
