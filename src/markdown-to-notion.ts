@@ -9,10 +9,21 @@ export type MarkdownToNotionOptions = {
   logger?: Logger;
 };
 
+type StandaloneMarkdownImage = {
+  altText: string;
+  source: string;
+};
+
+type ImageReplacementState = {
+  nextImageIndex: number;
+};
+
 const markdownParser = new MarkdownIt({
   html: false,
   linkify: true,
 });
+
+type MarkdownToken = ReturnType<typeof markdownParser.parse>[number];
 
 const TABLE_OF_CONTENTS_LABELS = new Set([
   "table of contents",
@@ -44,7 +55,8 @@ export function markdownToNotionBlocks(
 ): NotionBlock[] {
   const rawBlocks = markdownToBlocks(markdown) as unknown as NotionBlock[];
   const sanitized = sanitizeBlocks(rawBlocks, options);
-  return applyTableOfContents(sanitized);
+  const blocksWithImages = restoreStandaloneImageBlocks(markdown, sanitized, options);
+  return applyTableOfContents(blocksWithImages);
 }
 
 function sanitizeBlocks(blocks: NotionBlock[], options: MarkdownToNotionOptions): NotionBlock[] {
@@ -191,6 +203,201 @@ function isRelativeLink(href: string): boolean {
     return true;
   }
   return !/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(href);
+}
+
+function restoreStandaloneImageBlocks(
+  markdown: string,
+  blocks: NotionBlock[],
+  options: MarkdownToNotionOptions,
+): NotionBlock[] {
+  const markdownImages = extractStandaloneMarkdownImages(markdown);
+  if (!markdownImages.length) {
+    return blocks;
+  }
+  const replacementState: ImageReplacementState = { nextImageIndex: 0 };
+  return replaceStandaloneImageParagraphs(blocks, markdownImages, options, replacementState);
+}
+
+function extractStandaloneMarkdownImages(markdown: string): StandaloneMarkdownImage[] {
+  const tokens = markdownParser.parse(markdown, {});
+  const markdownImages: StandaloneMarkdownImage[] = [];
+
+  for (let index = 0; index < tokens.length - 2; index += 1) {
+    const openingToken = tokens[index];
+    const inlineToken = tokens[index + 1];
+    const closingToken = tokens[index + 2];
+    if (
+      openingToken.type !== "paragraph_open" ||
+      inlineToken?.type !== "inline" ||
+      closingToken?.type !== "paragraph_close"
+    ) {
+      continue;
+    }
+
+    const imageToken = getStandaloneImageToken(inlineToken.children ?? []);
+    if (!imageToken) {
+      continue;
+    }
+
+    const source = imageToken.attrGet("src");
+    if (!source) {
+      continue;
+    }
+
+    markdownImages.push({
+      altText: imageToken.content.trim(),
+      source,
+    });
+  }
+
+  return markdownImages;
+}
+
+function getStandaloneImageToken(children: MarkdownToken[]): MarkdownToken | null {
+  if (children.length !== 1) {
+    return null;
+  }
+  const [child] = children;
+  if (child.type !== "image") {
+    return null;
+  }
+  return child;
+}
+
+function replaceStandaloneImageParagraphs(
+  blocks: NotionBlock[],
+  markdownImages: StandaloneMarkdownImage[],
+  options: MarkdownToNotionOptions,
+  replacementState: ImageReplacementState,
+): NotionBlock[] {
+  const replacedBlocks: NotionBlock[] = [];
+
+  for (const block of blocks) {
+    const nextImage = markdownImages[replacementState.nextImageIndex];
+    const replacement = replaceStandaloneImageParagraph(block, nextImage, options);
+    const blockWithChildren = replaceBlockChildren(
+      replacement.block,
+      markdownImages,
+      options,
+      replacementState,
+    );
+    replacedBlocks.push(blockWithChildren);
+    if (replacement.replaced) {
+      replacementState.nextImageIndex += 1;
+    }
+  }
+
+  return replacedBlocks;
+}
+
+function replaceStandaloneImageParagraph(
+  block: NotionBlock,
+  markdownImage: StandaloneMarkdownImage | undefined,
+  options: MarkdownToNotionOptions,
+): { block: NotionBlock; replaced: boolean } {
+  if (!markdownImage || block.type !== "paragraph") {
+    return { block, replaced: false };
+  }
+
+  const paragraphText = getSingleParagraphText(block);
+  if (!paragraphText || paragraphText !== markdownImage.source) {
+    return { block, replaced: false };
+  }
+
+  const resolvedUrl = resolveImageUrl(markdownImage.source, options);
+  if (!resolvedUrl) {
+    return { block, replaced: false };
+  }
+
+  return {
+    block: createImageBlock(resolvedUrl, markdownImage.altText),
+    replaced: true,
+  };
+}
+
+function getSingleParagraphText(block: NotionBlock): string | null {
+  if (block.type !== "paragraph") {
+    return null;
+  }
+  const richText = block.paragraph?.rich_text;
+  if (!richText || richText.length !== 1) {
+    return null;
+  }
+  const [textItem] = richText;
+  if (textItem.type !== "text") {
+    return null;
+  }
+  return textItem.text.content.trim();
+}
+
+function resolveImageUrl(source: string, options: MarkdownToNotionOptions): string | null {
+  const trimmedSource = source.trim();
+  if (!trimmedSource) {
+    return null;
+  }
+
+  if (isRelativeLink(trimmedSource)) {
+    return options.resolveLink ? options.resolveLink(trimmedSource) : null;
+  }
+
+  try {
+    const imageUrl = new URL(trimmedSource);
+    if (imageUrl.protocol === "http:" || imageUrl.protocol === "https:") {
+      return imageUrl.toString();
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function createImageBlock(url: string, altText: string): NotionBlock {
+  const caption = altText ? createImageCaption(altText) : undefined;
+  return {
+    type: "image",
+    image: {
+      type: "external",
+      external: { url },
+      ...(caption ? { caption } : {}),
+    },
+  };
+}
+
+function createImageCaption(altText: string): NotionRichText[] {
+  return [
+    {
+      type: "text",
+      text: {
+        content: altText,
+      },
+    },
+  ];
+}
+
+function replaceBlockChildren(
+  block: NotionBlock,
+  markdownImages: StandaloneMarkdownImage[],
+  options: MarkdownToNotionOptions,
+  replacementState: ImageReplacementState,
+): NotionBlock {
+  const content = (block as Record<string, unknown>)[block.type];
+  if (!content || typeof content !== "object") {
+    return block;
+  }
+
+  const contentRecord = content as Record<string, unknown>;
+  if (!Array.isArray(contentRecord.children)) {
+    return block;
+  }
+
+  contentRecord.children = replaceStandaloneImageParagraphs(
+    contentRecord.children as NotionBlock[],
+    markdownImages,
+    options,
+    replacementState,
+  );
+  return block;
 }
 
 function applyTableOfContents(blocks: NotionBlock[]): NotionBlock[] {
