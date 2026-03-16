@@ -142,8 +142,8 @@ Example mapping file (the `title` column links to the Notion page URL):
 ```markdown
 | path                         | notion_page_id                       | title                                                                                 |
 | ---------------------------- | ------------------------------------ | ------------------------------------------------------------------------------------- |
-| getting-started.md           | 11111111-1111-1111-1111-111111111111 | [Getting Started](https://www.notion.so/11111111111111111111111111111111)             |
-| integrations/example-tags.md | 22222222-2222-2222-2222-222222222222 | [integrations → Example Tags](https://www.notion.so/22222222222222222222222222222222) |
+| getting-started.md           | 7754cf02-251f-4bc9-ab2f-9cc897765336 | [Getting Started](https://www.notion.so/7754cf02251f4bc9ab2f9cc897765336)             |
+| integrations/example-tags.md | 30c5e554-8603-8072-a733-d3bad8109a32 | [integrations → Example Tags](https://www.notion.so/30c5e55486038072a733d3bad8109a32) |
 ```
 
 ### 2) Title Selection
@@ -203,7 +203,7 @@ Example formats:
 
 - `b3c7a87c7eaa4ec4a23e1e6c20a12345`
 - `b3c7a87c-7eaa-4ec4-a23e-1e6c20a12345`
-- `https://www.notion.so/notion/sample-url-387aa331d0584c82ba09feaa972a7550#6ba23314-f308-4d8f-bd98-67b7286c9460` (URL that contains the ID)
+- `https://www.notion.so/7754cf02251f4bc9ab2f9cc897765336` (URL that contains the ID)
 
 To get a block ID:
 
