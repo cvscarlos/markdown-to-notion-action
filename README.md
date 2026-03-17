@@ -194,6 +194,7 @@ If new pages are created (or page mappings change), the action persists the upda
 This repository uses Git tags for versions. GitHub does not always show tag labels on the commits list, so use the Tags page to find the latest version:
 
 - GitHub → **Releases → Tags** or **Code → Tags**
+- Run `./update-v1-tag.sh` locally after publishing a new `v1.x.x` release if you want the floating `v1` tag to follow the latest major version.
 
 ## Notion ID Tips
 
@@ -215,6 +216,7 @@ To get a block ID:
 - `npm run format`
 - `npm run format:check`
 - `npm run typecheck`
+- `./update-v1-tag.sh`
 
 ## Troubleshooting
 
