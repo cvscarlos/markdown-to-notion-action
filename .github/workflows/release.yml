@@ -30,6 +30,8 @@ jobs:
         run: npx semantic-release
 
       - name: Update floating v1 tag
+        env:
+          WORKFLOW_TAG_TOKEN: ${{ secrets.WORKFLOW_TAG_TOKEN }}
         run: |
           latest_v1_tag="$(git tag --list 'v1.*' --sort=-v:refname | head -n 1)"
           if [ -z "$latest_v1_tag" ]; then
@@ -45,6 +47,11 @@ jobs:
             exit 0
           fi
 
+          if [ -z "$WORKFLOW_TAG_TOKEN" ]; then
+            echo "::error::Missing WORKFLOW_TAG_TOKEN secret. Use a token with contents and workflows permission to update the floating v1 tag."
+            exit 1
+          fi
+
           git tag -f v1 "$target_sha"
-          git push --force origin refs/tags/v1
+          git push --force "https://x-access-token:${WORKFLOW_TAG_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" refs/tags/v1
           echo "Updated v1 to point to $latest_v1_tag ($target_sha)."
