@@ -28,3 +28,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npx semantic-release
+
+      - name: Update floating v1 tag (non-blocking)
+        continue-on-error: true
+        run: ./update-v1-tag.sh
