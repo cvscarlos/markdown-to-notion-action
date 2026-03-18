@@ -1,12 +1,23 @@
 import * as core from "@actions/core";
 import * as github from "@actions/github";
 import { Client } from "@notionhq/client";
-import { execFile } from "child_process";
-import * as frontMatter from "front-matter";
-import * as fs from "fs/promises";
 import * as path from "path";
-import { promisify } from "util";
-import { markdownToNotionBlocks, extractTitle } from "./markdown-to-notion.js";
+import {
+  normalizeCommitStrategy,
+  normalizeFormatterChoice,
+  normalizePrBranchPrefix,
+  normalizeTitlePrefixSeparator,
+  readInput,
+  resolveFormatterConfigPath,
+} from "./action-inputs.js";
+import type { CommitStrategy } from "./action-inputs.js";
+import {
+  buildBlocksForDocument,
+  buildNotionPageTitle,
+  collectMarkdownFiles,
+  ensureDirectoryExists,
+  loadMarkdownDocuments,
+} from "./documents.js";
 import type { NotionBlock } from "./notion-types.js";
 import {
   commitAndPush,
@@ -14,99 +25,35 @@ import {
   getCurrentBranch,
   getLastCommitTime,
 } from "./git-utils.js";
-
-type AppendChildrenRequest = Parameters<Client["blocks"]["children"]["append"]>[0];
-type AppendChildren = AppendChildrenRequest["children"];
-type BlocksChildrenListResponse = Awaited<ReturnType<Client["blocks"]["children"]["list"]>>;
-type PartialBlockObjectResponse = BlocksChildrenListResponse["results"][number];
-type BlockUpdateRequest = Parameters<Client["blocks"]["update"]>[0];
-type CalloutUpdateRequest = Extract<BlockUpdateRequest, { callout: unknown }>;
-type CalloutIconRequest = CalloutUpdateRequest["callout"] extends { icon?: infer T } ? T : never;
-type FrontMatterResult<T> = { attributes: T; body: string };
-type FrontMatterParser = <T>(
-  file: string,
-  options?: { allowUnsafe?: boolean },
-) => FrontMatterResult<T>;
-
-type MarkdownDocument = {
-  absPath: string;
-  relPath: string;
-  body: string;
-  attributes: Record<string, unknown>;
-  title: string;
-  notionPageId?: string;
-  notionUrl?: string;
-};
-
-type CommitStrategy = "push" | "pr" | "none";
-
-type SyncedPage = {
-  pageId: string;
-  title: string;
-};
-
-type MappingEntry = {
-  pageId: string;
-  title?: string;
-};
-
-type LogContext = {
-  info: (message: string) => void;
-  warn: (message: string) => void;
-};
+import { createLogContext, defaultLogContext } from "./logging.js";
+import {
+  formatMappingFileIfFormatterAvailable,
+  normalizeMappingKey,
+  readMappingFile,
+  resolveMappingFilePath,
+  writeMappingFile,
+} from "./mapping-file.js";
+import {
+  type AppendChildren,
+  type BlockUpdateRequest,
+  type CalloutIconRequest,
+  type PartialBlockObjectResponse,
+  isNotionArchivedError,
+  isNotionNotFoundError,
+  listAllChildren,
+  normalizeNotionId,
+  normalizeNotionIdValue,
+  notionPageUrl,
+  notionRequest,
+  toDashedId,
+} from "./notion-api.js";
+import type { LogContext } from "./logging.js";
+import type { SyncedPage } from "./sync-types.js";
 
 type SyncDecision = {
   skipSync: boolean;
   archivedOrMissing: boolean;
 };
-
-type FormatterChoice = "biome" | "none" | "prettier";
-
-type FormatterOption = {
-  command: string;
-  displayName: string;
-  formatArgs: string[];
-};
-
-type FormatterSettings = {
-  command: string;
-  displayName: string;
-  baseArgs: string[];
-  configFlag: string;
-};
-
-const defaultLogContext: LogContext = {
-  info: (message) => core.info(message),
-  warn: (message) => core.warning(message),
-};
-
-const MAX_IMAGE_UPLOAD_BYTES = 20 * 1024 * 1024;
-const execFileAsync = promisify(execFile);
-
-const FORMATTER_SETTINGS: Record<Exclude<FormatterChoice, "none">, FormatterSettings> = {
-  prettier: {
-    command: "prettier",
-    displayName: "Prettier",
-    baseArgs: ["--write"],
-    configFlag: "--config",
-  },
-  biome: {
-    command: "@biomejs/biome",
-    displayName: "Biome",
-    baseArgs: ["format", "--write"],
-    configFlag: "--config-path",
-  },
-};
-
-function createLogContext(prefix?: string): LogContext {
-  if (!prefix) {
-    return defaultLogContext;
-  }
-  return {
-    info: (message) => core.info(`[${prefix}] ${message}`),
-    warn: (message) => core.warning(`[${prefix}] ${message}`),
-  };
-}
 
 async function run(): Promise<void> {
   try {
@@ -315,720 +262,6 @@ async function run(): Promise<void> {
   }
 }
 
-function readInput(name: string, envFallbacks: string[]): string {
-  const coreValue = core.getInput(name);
-  if (coreValue) {
-    return coreValue.trim();
-  }
-  for (const env of envFallbacks) {
-    const value = process.env[env];
-    if (value) {
-      return value.trim();
-    }
-  }
-  return "";
-}
-
-function isNotionNotFoundError(error: unknown): boolean {
-  if (!error || typeof error !== "object") {
-    return false;
-  }
-  const errorDetails = error as { code?: string; status?: number; message?: string };
-  if (errorDetails.code === "object_not_found") {
-    return true;
-  }
-  if (errorDetails.status === 404) {
-    return true;
-  }
-  if (
-    typeof errorDetails.message === "string" &&
-    errorDetails.message.toLowerCase().includes("not found")
-  ) {
-    return true;
-  }
-  return false;
-}
-
-function isNotionArchivedError(error: unknown): boolean {
-  if (!error || typeof error !== "object") {
-    return false;
-  }
-  const errorDetails = error as { code?: string; message?: string };
-  if (errorDetails.code !== "validation_error") {
-    return false;
-  }
-  if (typeof errorDetails.message !== "string") {
-    return false;
-  }
-  return errorDetails.message.toLowerCase().includes("archived");
-}
-
-function normalizeTitlePrefixSeparator(value: string): string {
-  const trimmed = value.trim();
-  if (trimmed.length === 0) {
-    return "→";
-  }
-  return trimmed;
-}
-
-function normalizeFormatterChoice(value: string): FormatterChoice {
-  const normalized = value.trim().toLowerCase() || "prettier";
-  if (["prettier", "biome", "none"].includes(normalized)) {
-    return normalized as FormatterChoice;
-  }
-  throw new Error(`Invalid formatter: ${value}. Use 'prettier', 'biome', or 'none'.`);
-}
-
-function resolveFormatterConfigPath(value: string, workspaceRoot: string): string | null {
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return null;
-  }
-  return path.isAbsolute(trimmed) ? trimmed : path.resolve(workspaceRoot, trimmed);
-}
-
-function normalizePrBranchPrefix(value: string): string {
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return "auto-notion-sync/";
-  }
-  return trimmed.endsWith("/") ? trimmed : `${trimmed}/`;
-}
-
-function resolveMappingFilePath(
-  docsFolderPath: string,
-  workspaceRoot: string,
-  input: string,
-): string {
-  const trimmed = input.trim();
-  if (!trimmed) {
-    return path.join(docsFolderPath, "_notion_links.md");
-  }
-  if (path.isAbsolute(trimmed)) {
-    return trimmed;
-  }
-  return path.resolve(workspaceRoot, trimmed);
-}
-
-function normalizeMappingKey(relPath: string): string {
-  return relPath.replace(/\\/g, "/");
-}
-
-async function buildBlocksForDocument(
-  notion: Client,
-  documentEntry: MarkdownDocument,
-  docsFolderPath: string,
-  workspaceRoot: string,
-  knownPageUrls: Map<string, string>,
-  githubToken: string | null,
-  logContext: LogContext,
-): Promise<NotionBlock[]> {
-  const resolveMarkdownLink = (href: string) =>
-    resolveRelativeLink(href, documentEntry.absPath, docsFolderPath, workspaceRoot, knownPageUrls);
-  const blocks = markdownToNotionBlocks(documentEntry.body, {
-    resolveLink: resolveMarkdownLink,
-    logger: (message) => logContext.info(message),
-  });
-  await uploadImageBlocks(notion, blocks, githubToken, logContext);
-  return blocks;
-}
-
-async function readMappingFile(mappingFilePath: string): Promise<Map<string, MappingEntry>> {
-  try {
-    const content = await fs.readFile(mappingFilePath, "utf8");
-    const parsed = parseMappingTable(content);
-    if (!parsed) {
-      return new Map();
-    }
-    const { header, rows } = parsed;
-    const headerMap = header.map((value) => value.trim().toLowerCase());
-    const pathIndex = headerMap.findIndex((value) => ["path", "file", "markdown"].includes(value));
-    const idIndex = headerMap.findIndex((value) =>
-      ["notion_page_id", "notion_page", "notion_id"].includes(value),
-    );
-    const titleIndex = headerMap.findIndex((value) => value === "title");
-    if (pathIndex === -1 || idIndex === -1) {
-      return new Map();
-    }
-    const entries = new Map<string, MappingEntry>();
-    for (const row of rows) {
-      const rawPath = row[pathIndex]?.trim();
-      const rawId = row[idIndex]?.trim();
-      if (!rawPath || !rawId) {
-        continue;
-      }
-      try {
-        const normalizedPath = normalizeMappingKey(rawPath);
-        const normalizedId = normalizeNotionId(rawId);
-        const title = titleIndex >= 0 ? row[titleIndex]?.trim() : undefined;
-        entries.set(normalizedPath, { pageId: normalizedId, title });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        core.warning(`Invalid notion_page_id in mapping file for ${rawPath}: ${message}`);
-      }
-    }
-    return entries;
-  } catch (error) {
-    const errorDetails = error as { code?: string };
-    if (errorDetails.code === "ENOENT") {
-      return new Map();
-    }
-    throw error;
-  }
-}
-
-async function writeMappingFile(
-  mappingFilePath: string,
-  entries: Map<string, MappingEntry>,
-): Promise<void> {
-  const lines = buildMappingTable(entries);
-  await fs.writeFile(mappingFilePath, lines, "utf8");
-}
-
-async function formatMappingFileIfFormatterAvailable(
-  mappingFilePath: string,
-  workspaceRoot: string,
-  formatterChoice: FormatterChoice,
-  formatterConfigPath: string | null,
-): Promise<void> {
-  if (formatterChoice === "none") {
-    core.info("Formatter disabled. Skipping mapping file formatting.");
-    return;
-  }
-
-  const formatter = buildFormatterOption(formatterChoice, formatterConfigPath);
-  core.info(`Formatting mapping file with ${formatter.displayName}: ${mappingFilePath}`);
-  if (formatterConfigPath) {
-    core.info(`Using ${formatter.displayName} config: ${formatterConfigPath}`);
-  }
-
-  const result = await runFormatterCommand(formatter, mappingFilePath, workspaceRoot);
-  if (result.success) {
-    core.info(`Formatted mapping file with ${formatter.displayName}.`);
-    return;
-  }
-  const errorSuffix = result.error ? ` (${result.error})` : "";
-  core.warning(`${formatter.displayName} failed to format${errorSuffix}.`);
-}
-
-function buildFormatterOption(
-  formatterChoice: FormatterChoice,
-  formatterConfigPath: string | null,
-): FormatterOption {
-  const settings = FORMATTER_SETTINGS[formatterChoice as Exclude<FormatterChoice, "none">];
-  if (settings) {
-    const args = [...settings.baseArgs];
-    if (formatterConfigPath) {
-      args.push(settings.configFlag, formatterConfigPath);
-    }
-    return {
-      command: settings.command,
-      displayName: settings.displayName,
-      formatArgs: args,
-    };
-  }
-  throw new Error(`Unsupported formatter selection: ${formatterChoice}`);
-}
-
-async function runFormatterCommand(
-  formatter: FormatterOption,
-  mappingFilePath: string,
-  workspaceRoot: string,
-): Promise<{ success: boolean; error?: string }> {
-  const commandArgs = ["--yes", formatter.command, ...formatter.formatArgs, mappingFilePath];
-  try {
-    await execFileAsync("npx", commandArgs, {
-      cwd: workspaceRoot,
-      env: process.env,
-    });
-    return { success: true };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return { success: false, error: message };
-  }
-}
-
-function parseMappingTable(content: string): { header: string[]; rows: string[][] } | null {
-  const lines = content.split(/\r?\n/);
-  for (let i = 0; i < lines.length - 1; i += 1) {
-    const headerLine = lines[i];
-    if (!headerLine.includes("|")) {
-      continue;
-    }
-    const header = splitTableRow(headerLine);
-    if (!header.some((cell) => cell.trim().toLowerCase() === "notion_page_id")) {
-      continue;
-    }
-    const separatorLine = lines[i + 1] ?? "";
-    if (!isSeparatorRow(separatorLine)) {
-      continue;
-    }
-    const rows: string[][] = [];
-    for (let j = i + 2; j < lines.length; j += 1) {
-      const line = lines[j];
-      if (!line.includes("|")) {
-        break;
-      }
-      const row = splitTableRow(line);
-      if (row.length === 0) {
-        break;
-      }
-      rows.push(row);
-    }
-    return { header, rows };
-  }
-  return null;
-}
-
-function splitTableRow(line: string): string[] {
-  let trimmed = line.trim();
-  if (trimmed.startsWith("|")) {
-    trimmed = trimmed.slice(1);
-  }
-  if (trimmed.endsWith("|")) {
-    trimmed = trimmed.slice(0, -1);
-  }
-  return trimmed.split("|").map((cell) => cell.trim());
-}
-
-function isSeparatorRow(line: string): boolean {
-  if (!line.includes("|")) {
-    return false;
-  }
-  const stripped = line.replace(/[\s|\-:]/g, "");
-  return stripped.length === 0;
-}
-
-function buildMappingTable(entries: Map<string, MappingEntry>): string {
-  const rows = Array.from(entries.entries()).sort((a, b) => a[0].localeCompare(b[0]));
-  const lines = ["| path | notion_page_id | title |", "| --- | --- | --- |"];
-  for (const [relPath, entry] of rows) {
-    const title = entry.title ?? "";
-    const pageUrl = notionPageUrl(entry.pageId);
-    const linkedTitle = title ? `[${title}](${pageUrl})` : pageUrl;
-    lines.push(`| ${relPath} | ${toDashedId(entry.pageId)} | ${linkedTitle} |`);
-  }
-  return `${lines.join("\n")}\n`;
-}
-
-function normalizeCommitStrategy(value: string): CommitStrategy {
-  const normalized = value.trim().toLowerCase();
-  if (!normalized || normalized === "push") {
-    return "push";
-  }
-  if (normalized === "pr" || normalized === "none") {
-    return normalized;
-  }
-  core.warning(`Unknown commit_strategy '${value}', defaulting to 'push'.`);
-  return "push";
-}
-
-async function ensureDirectoryExists(dirPath: string): Promise<void> {
-  const stats = await fs.stat(dirPath);
-  if (!stats.isDirectory()) {
-    throw new Error(`${dirPath} is not a directory.`);
-  }
-}
-
-async function collectMarkdownFiles(dirPath: string, mappingFilePath: string): Promise<string[]> {
-  const entries = await fs.readdir(dirPath, { withFileTypes: true });
-  const files: string[] = [];
-  for (const entry of entries) {
-    const fullPath = path.join(dirPath, entry.name);
-    if (entry.isDirectory()) {
-      if (entry.name === "node_modules" || entry.name.startsWith(".")) {
-        continue;
-      }
-      files.push(...(await collectMarkdownFiles(fullPath, mappingFilePath)));
-    } else if (entry.isFile() && entry.name.toLowerCase().endsWith(".md")) {
-      if (path.resolve(fullPath) === path.resolve(mappingFilePath)) {
-        continue;
-      }
-      files.push(fullPath);
-    }
-  }
-  return files;
-}
-
-async function loadMarkdownDocuments(
-  markdownFiles: string[],
-  docsRoot: string,
-  mapping: Map<string, MappingEntry>,
-): Promise<MarkdownDocument[]> {
-  const documents: MarkdownDocument[] = [];
-  for (const filePath of markdownFiles) {
-    const markdownContent = await fs.readFile(filePath, "utf8");
-    const parsedFrontMatter = (frontMatter.default as unknown as FrontMatterParser)<
-      Record<string, unknown>
-    >(markdownContent);
-    const frontMatterAttributes = parsedFrontMatter.attributes || {};
-    const markdownBody = parsedFrontMatter.body || "";
-
-    const relPath = normalizeMappingKey(path.relative(docsRoot, filePath));
-    let notionPageId: string | undefined;
-    const mappedEntry = mapping.get(relPath);
-    if (mappedEntry?.pageId) {
-      notionPageId = normalizeNotionId(mappedEntry.pageId);
-    } else if (
-      typeof frontMatterAttributes.notion_page_id === "string" &&
-      frontMatterAttributes.notion_page_id.trim().length > 0
-    ) {
-      try {
-        notionPageId = normalizeNotionId(frontMatterAttributes.notion_page_id);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        core.warning(`Invalid notion_page_id in ${filePath}: ${message}`);
-      }
-    }
-
-    const extractedTitle = extractTitle(markdownBody);
-    const title = extractedTitle || path.basename(filePath, ".md");
-
-    documents.push({
-      absPath: filePath,
-      relPath: relPath,
-      body: markdownBody,
-      attributes: frontMatterAttributes,
-      title,
-      notionPageId,
-      notionUrl: notionPageId ? notionPageUrl(notionPageId) : undefined,
-    });
-  }
-
-  return documents;
-}
-
-function resolveRelativeLink(
-  href: string,
-  currentFilePath: string,
-  docsRoot: string,
-  workspaceRoot: string,
-  knownPageUrls: Map<string, string>,
-): string | null {
-  const cleaned = href.split("#")[0].split("?")[0];
-  if (!cleaned) {
-    return null;
-  }
-
-  const resolvedPath = path.resolve(path.dirname(currentFilePath), cleaned);
-  const relativePath = path.relative(docsRoot, resolvedPath);
-  if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
-    return null;
-  }
-
-  if (path.extname(resolvedPath).toLowerCase() === ".md") {
-    return knownPageUrls.get(resolvedPath) || null;
-  }
-
-  const repoRelativePath = path.relative(workspaceRoot, resolvedPath);
-  if (repoRelativePath.startsWith("..") || path.isAbsolute(repoRelativePath)) {
-    return null;
-  }
-
-  return buildGitHubRawUrl(repoRelativePath);
-}
-
-function buildGitHubRawUrl(repoRelativePath: string): string | null {
-  const ownerRepo = process.env.GITHUB_REPOSITORY;
-  if (!ownerRepo) {
-    return null;
-  }
-  const ref = process.env.GITHUB_SHA || process.env.GITHUB_REF_NAME;
-  if (!ref) {
-    return null;
-  }
-  const normalizedPath = repoRelativePath.split(path.sep).join("/");
-  const serverUrl = (process.env.GITHUB_SERVER_URL || "https://github.com").replace(/\/+$/, "");
-  if (serverUrl === "https://github.com") {
-    return `https://raw.githubusercontent.com/${ownerRepo}/${ref}/${normalizedPath}`;
-  }
-  return `${serverUrl}/raw/${ownerRepo}/${ref}/${normalizedPath}`;
-}
-
-type GitHubContentsRequest = {
-  url: string;
-  path: string;
-};
-
-type GitHubFile = {
-  buffer: Buffer;
-  contentType: string;
-  size: number;
-  filename: string;
-  path: string;
-};
-
-function getGitHubContentsRequestFromRawUrl(rawUrl: string): GitHubContentsRequest | null {
-  let parsed: URL;
-  try {
-    parsed = new URL(rawUrl);
-  } catch {
-    return null;
-  }
-
-  let ownerRepo: string | null = null;
-  let ref: string | null = null;
-  let filePath: string | null = null;
-
-  if (parsed.hostname === "raw.githubusercontent.com") {
-    const segments = parsed.pathname.split("/").filter(Boolean);
-    if (segments.length < 4) {
-      return null;
-    }
-    ownerRepo = `${segments[0]}/${segments[1]}`;
-    ref = segments[2];
-    filePath = segments.slice(3).join("/");
-  } else {
-    const serverUrl = (process.env.GITHUB_SERVER_URL || "https://github.com").replace(/\/+$/, "");
-    if (parsed.origin !== serverUrl) {
-      return null;
-    }
-    const segments = parsed.pathname.split("/").filter(Boolean);
-    if (segments.length < 5 || segments[0] !== "raw") {
-      return null;
-    }
-    ownerRepo = `${segments[1]}/${segments[2]}`;
-    ref = segments[3];
-    filePath = segments.slice(4).join("/");
-  }
-
-  if (!ownerRepo || !ref || !filePath) {
-    return null;
-  }
-
-  const apiBase = (process.env.GITHUB_API_URL || "https://api.github.com").replace(/\/+$/, "");
-  const encodedPath = filePath.split("/").map(encodeURIComponent).join("/");
-  const encodedRef = encodeURIComponent(ref);
-  return {
-    url: `${apiBase}/repos/${ownerRepo}/contents/${encodedPath}?ref=${encodedRef}`,
-    path: filePath,
-  };
-}
-
-async function fetchGitHubFile(
-  request: GitHubContentsRequest,
-  githubToken: string | null,
-  expectedContentType: string,
-  logContext: LogContext,
-): Promise<GitHubFile | null> {
-  const headers: Record<string, string> = {
-    Accept: "application/vnd.github.raw+json",
-    "X-GitHub-Api-Version": "2022-11-28",
-  };
-  if (githubToken) {
-    headers.Authorization = `Bearer ${githubToken}`;
-  }
-
-  const response = await fetch(request.url, { headers });
-  if (!response.ok) {
-    logContext.warn(`Skipping image ${request.path}: GitHub fetch failed (${response.status}).`);
-    return null;
-  }
-
-  const contentLengthHeader = response.headers.get("content-length");
-  if (contentLengthHeader) {
-    const contentLength = Number(contentLengthHeader);
-    if (Number.isFinite(contentLength) && contentLength > MAX_IMAGE_UPLOAD_BYTES) {
-      logContext.warn(`Skipping image ${request.path}: file size ${contentLength} exceeds 20MB.`);
-      return null;
-    }
-  }
-
-  const arrayBuffer = await response.arrayBuffer();
-  const buffer = Buffer.from(arrayBuffer);
-  if (buffer.length > MAX_IMAGE_UPLOAD_BYTES) {
-    logContext.warn(`Skipping image ${request.path}: file size ${buffer.length} exceeds 20MB.`);
-    return null;
-  }
-
-  const headerContentType = response.headers.get("content-type") || "";
-  const contentType = headerContentType.startsWith("image/")
-    ? headerContentType
-    : expectedContentType;
-  if (!contentType) {
-    logContext.warn(`Skipping image ${request.path}: unsupported content type.`);
-    return null;
-  }
-
-  return {
-    buffer,
-    contentType,
-    size: buffer.length,
-    filename: path.basename(request.path),
-    path: request.path,
-  };
-}
-
-function describeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-async function runStepWithLogging<T>(
-  logContext: LogContext,
-  startMessage: string,
-  successMessage: string,
-  operation: () => Promise<T>,
-): Promise<T> {
-  logContext.info(startMessage);
-  try {
-    const result = await operation();
-    logContext.info(successMessage);
-    return result;
-  } catch (error) {
-    logContext.warn(`${startMessage} Failed: ${describeError(error)}`);
-    throw error instanceof Error ? error : new Error(String(error));
-  }
-}
-
-async function uploadImageBlocks(
-  notion: Client,
-  blocks: NotionBlock[],
-  githubToken: string | null,
-  logContext: LogContext,
-): Promise<void> {
-  for (const block of blocks) {
-    await uploadImageBlock(notion, block, githubToken, logContext);
-    const children = getBlockChildren(block);
-    if (children.length > 0) {
-      await uploadImageBlocks(notion, children, githubToken, logContext);
-    }
-  }
-}
-
-async function uploadImageBlock(
-  notion: Client,
-  block: NotionBlock,
-  githubToken: string | null,
-  logContext: LogContext,
-): Promise<void> {
-  if (block.type !== "image") {
-    return;
-  }
-  const image = block.image;
-  if (image.type !== "external" || !image.external?.url) {
-    return;
-  }
-
-  const githubContentsRequest = getGitHubContentsRequestFromRawUrl(image.external.url);
-  if (!githubContentsRequest) {
-    logContext.info(`Skipping image ${image.external.url}: not a supported GitHub raw URL.`);
-    return;
-  }
-
-  const expectedImageContentType = getUploadableImageContentType(githubContentsRequest.path);
-  if (!expectedImageContentType) {
-    logContext.info(
-      `Skipping image ${githubContentsRequest.path}: only PNG, JPG, JPEG, and GIF are uploaded.`,
-    );
-    return;
-  }
-
-  const imageFile = await runStepWithLogging(
-    logContext,
-    `Starting GitHub image fetch for ${githubContentsRequest.path}.`,
-    `Finished GitHub image fetch for ${githubContentsRequest.path}.`,
-    () => fetchGitHubFile(githubContentsRequest, githubToken, expectedImageContentType, logContext),
-  );
-  if (!imageFile) {
-    logContext.info(
-      `Skipping image ${githubContentsRequest.path}: GitHub fetch returned no uploadable file.`,
-    );
-    return;
-  }
-
-  logContext.info(`Starting Notion image upload for ${imageFile.path} (${imageFile.size} bytes).`);
-  /**
-   * Notion API: Create a file upload
-   * https://developers.notion.com/reference/create-a-file-upload.md
-   */
-  const fileUpload = await runStepWithLogging(
-    logContext,
-    `Starting Notion file upload creation for ${imageFile.filename}.`,
-    `Finished Notion file upload creation for ${imageFile.filename}.`,
-    () =>
-      notionRequest(
-        () =>
-          notion.fileUploads.create({
-            mode: "single_part",
-            filename: imageFile.filename,
-            content_type: imageFile.contentType,
-          }),
-        `fileUploads.create ${imageFile.filename}`,
-      ),
-  );
-  const uploadId = fileUpload.id;
-
-  const blob = new Blob([new Uint8Array(imageFile.buffer)], { type: imageFile.contentType });
-  /**
-   * Notion API: Send a file upload
-   * https://developers.notion.com/reference/send-a-file-upload.md
-   */
-  await runStepWithLogging(
-    logContext,
-    `Starting Notion file upload send for ${imageFile.filename}.`,
-    `Finished Notion file upload send for ${imageFile.filename}.`,
-    () =>
-      notionRequest(
-        () =>
-          notion.fileUploads.send({
-            file_upload_id: uploadId,
-            file: {
-              data: blob,
-              filename: imageFile.filename,
-            },
-          }),
-        `fileUploads.send ${uploadId}`,
-      ),
-  );
-
-  const caption = image.caption;
-  block.image = {
-    type: "file_upload",
-    file_upload: { id: uploadId },
-    ...(caption ? { caption } : {}),
-  };
-  logContext.info(`Image block now references Notion upload ${uploadId} for ${imageFile.path}.`);
-}
-
-function getUploadableImageContentType(filePath: string): string | null {
-  switch (path.extname(filePath).toLowerCase()) {
-    case ".gif":
-      return "image/gif";
-    case ".jpeg":
-    case ".jpg":
-      return "image/jpeg";
-    case ".png":
-      return "image/png";
-    default:
-      return null;
-  }
-}
-
-function normalizeNotionId(input: string): string {
-  const matches = input.match(
-    /[0-9a-fA-F]{32}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/g,
-  );
-  if (!matches || matches.length === 0) {
-    throw new Error(`Invalid Notion id: ${input}`);
-  }
-  const raw = matches[matches.length - 1];
-  const cleaned = raw.replace(/-/g, "").toLowerCase();
-  if (cleaned.length !== 32) {
-    throw new Error(`Invalid Notion id: ${input}`);
-  }
-  return cleaned;
-}
-
-function toDashedId(id: string): string {
-  const cleaned = normalizeNotionId(id);
-  return `${cleaned.slice(0, 8)}-${cleaned.slice(8, 12)}-${cleaned.slice(12, 16)}-${cleaned.slice(16, 20)}-${cleaned.slice(20)}`;
-}
-
-function notionPageUrl(id: string): string {
-  const cleaned = normalizeNotionId(id);
-  return `https://www.notion.so/${cleaned}`;
-}
-
 async function resolveParentPageId(notion: Client, blockId: string): Promise<string> {
   let currentBlockId = toDashedId(blockId);
   for (let depth = 0; depth < 10; depth += 1) {
@@ -1175,26 +408,6 @@ function buildTitleProperty(title: string): PageProperties {
   } as PageProperties;
 }
 
-function buildNotionPageTitle(documentEntry: MarkdownDocument, separator: string): string {
-  const baseTitle = documentEntry.title || "Untitled";
-  const folderPath = normalizeFolderPath(documentEntry.relPath);
-  if (!folderPath) {
-    return baseTitle;
-  }
-  const normalizedSeparator = separator.trim();
-  const separatorText = normalizedSeparator.length > 0 ? ` ${normalizedSeparator} ` : " ";
-  return `${folderPath.replace(/\//g, separatorText)}${separatorText}${baseTitle}`;
-}
-
-function normalizeFolderPath(relPath: string): string {
-  const normalized = relPath.replace(/\\/g, "/");
-  const dir = path.posix.dirname(normalized);
-  if (dir === "." || dir === "/") {
-    return "";
-  }
-  return dir.replace(/^\/+/, "");
-}
-
 async function persistNotionIds(
   changedFiles: string[],
   githubToken: string,
@@ -1323,34 +536,6 @@ async function clearChildren(
   }
 
   logContext.info("Finished clearing page.");
-}
-
-async function listAllChildren(
-  notion: Client,
-  blockId: string,
-): Promise<PartialBlockObjectResponse[]> {
-  const results: PartialBlockObjectResponse[] = [];
-  let cursor: string | undefined;
-
-  do {
-    /**
-     * Notion API: Retrieve block children
-     * https://developers.notion.com/reference/get-block-children.md
-     */
-    const response = await notionRequest(
-      () =>
-        notion.blocks.children.list({
-          block_id: toDashedId(blockId),
-          start_cursor: cursor,
-          page_size: 100,
-        }),
-      `blocks.children.list ${blockId}`,
-    );
-    results.push(...response.results);
-    cursor = response.has_more ? response.next_cursor || undefined : undefined;
-  } while (cursor);
-
-  return results;
 }
 
 type BlockSyncStats = {
@@ -2224,95 +1409,33 @@ function toCalloutIconRequest(value: unknown): CalloutIconRequest | undefined {
   return undefined;
 }
 
-function normalizeNotionIdValue(value: unknown): string | undefined {
-  if (typeof value !== "string") {
-    return undefined;
-  }
-  try {
-    return normalizeNotionId(value);
-  } catch {
-    return value;
-  }
-}
-
 function extractImageUrl(record: Record<string, unknown>): string | null {
-  const type = typeof record.type === "string" ? record.type : null;
-  if (type === "external") {
-    const external = record.external as Record<string, unknown> | undefined;
-    const url = external && typeof external.url === "string" ? external.url : null;
-    return url || null;
+  const imageType = typeof record.type === "string" ? record.type : null;
+  if (imageType === "external") {
+    const external = record.external as { url?: unknown } | undefined;
+    return typeof external?.url === "string" ? external.url : null;
   }
-  if (type === "file") {
-    const file = record.file as Record<string, unknown> | undefined;
-    const url = file && typeof file.url === "string" ? file.url : null;
-    return url || null;
+  if (imageType === "file") {
+    const file = record.file as { url?: unknown } | undefined;
+    return typeof file?.url === "string" ? file.url : null;
+  }
+  if (imageType === "file_upload") {
+    const fileUpload = record.file_upload as { id?: unknown } | undefined;
+    return typeof fileUpload?.id === "string" ? fileUpload.id : null;
   }
   return null;
 }
 
 function chunkArray<T>(items: T[], size: number): T[][] {
   const chunks: T[][] = [];
-  for (let i = 0; i < items.length; i += size) {
-    chunks.push(items.slice(i, i + size));
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
   }
   return chunks;
 }
 
 function toNotionBlockRequests(blocks: NotionBlock[]): AppendChildren {
-  return blocks as unknown as AppendChildren;
-}
-
-async function notionRequest<T>(operation: () => Promise<T>, label: string): Promise<T> {
-  const maxAttempts = 5;
-  let attempt = 0;
-  let lastError: unknown;
-  while (attempt < maxAttempts) {
-    try {
-      return await operation();
-    } catch (error) {
-      lastError = error;
-      if (!isRateLimitError(error)) {
-        throw error;
-      }
-      attempt += 1;
-      const delayMs = getRetryDelayMs(error, attempt);
-      core.warning(`Notion rate limited (${label}). Retrying in ${delayMs}ms.`);
-      await sleep(delayMs);
-    }
-  }
-  throw lastError instanceof Error ? lastError : new Error(String(lastError));
-}
-
-function isRateLimitError(error: unknown): boolean {
-  if (!error || typeof error !== "object") {
-    return false;
-  }
-  const errorDetails = error as { code?: string; status?: number };
-  return errorDetails.code === "rate_limited" || errorDetails.status === 429;
-}
-
-function getRetryDelayMs(error: unknown, attempt: number): number {
-  const errorDetails = error as {
-    body?: { retry_after?: number };
-    headers?: Record<string, string>;
-  };
-  const retryAfterHeader = errorDetails.headers?.["retry-after"];
-  const headerSeconds = retryAfterHeader ? Number.parseFloat(retryAfterHeader) : NaN;
-  if (!Number.isNaN(headerSeconds) && headerSeconds > 0) {
-    return Math.ceil(headerSeconds * 1000);
-  }
-  const bodySeconds = errorDetails.body?.retry_after;
-  if (typeof bodySeconds === "number" && bodySeconds > 0) {
-    return Math.ceil(bodySeconds * 1000);
-  }
-  const base = 1000;
-  const backoff = base * Math.pow(2, attempt - 1);
-  const jitter = Math.floor(Math.random() * 250);
-  return backoff + jitter;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return blocks as AppendChildren;
 }
 
 run();
