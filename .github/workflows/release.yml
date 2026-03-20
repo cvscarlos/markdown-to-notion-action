@@ -31,4 +31,4 @@ jobs:
 
       - name: Update floating v1 tag (non-blocking)
         continue-on-error: true
-        run: ./update-v1-tag.sh
+        run: ./.github/update-v1-tag.sh

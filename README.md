@@ -195,7 +195,7 @@ This repository uses Git tags for versions. GitHub does not always show tag labe
 
 - GitHub → **Releases → Tags** or **Code → Tags**
 - The manual release workflow attempts to move the floating `v1` tag to the latest `v1.x.x` release.
-- If that step fails or GitHub keeps the wrong ref cached, run `./update-v1-tag.sh` locally as a fallback.
+- If that step fails or GitHub keeps the wrong ref cached, run `./.github/update-v1-tag.sh` locally as a fallback.
 
 ## Notion ID Tips
 
@@ -217,7 +217,7 @@ To get a block ID:
 - `npm run format`
 - `npm run format:check`
 - `npm run typecheck`
-- `./update-v1-tag.sh`
+- `./.github/update-v1-tag.sh`
 
 ## Troubleshooting
 
