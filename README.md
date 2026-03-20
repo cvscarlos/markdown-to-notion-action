@@ -251,13 +251,11 @@ Make sure the integration has access to the target page/block (Share → invite 
 
 ### "Nothing syncs even though I expected changes"
 
-The action skips syncing a page if Notion's `last_edited_time` is newer than the file's last Git commit time. Ensure your workflow checks out full history so `git log` works:
+The action skips syncing a page if Notion's `last_edited_time` is newer than the file's last commit time.
 
-```yaml
-- uses: actions/checkout@v6
-  with:
-    fetch-depth: 0
-```
+In GitHub Actions it checks the latest commit for that file via the GitHub commits API first, so a full clone is not required.
+
+If the GitHub API lookup is unavailable, it falls back to local `git log`, which may require enough local history to reach the file's last change.
 
 ## Behavior Notes
 

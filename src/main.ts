@@ -141,6 +141,7 @@ async function run(): Promise<void> {
             notion,
             pageId,
             documentEntry.absPath,
+            githubToken,
             workspaceRoot,
             documentLog,
           );
@@ -342,10 +343,11 @@ async function getSyncDecision(
   notion: Client,
   pageId: string,
   filePath: string,
+  githubToken: string | null,
   workspaceRoot: string,
   logContext: LogContext = defaultLogContext,
 ): Promise<SyncDecision> {
-  const lastCommitTime = await getLastCommitTime(filePath, workspaceRoot);
+  const lastCommitTime = await getLastCommitTime(filePath, workspaceRoot, githubToken);
   if (!lastCommitTime) {
     logContext.warn(`Unable to read git commit time for ${filePath}. Syncing.`);
   }
