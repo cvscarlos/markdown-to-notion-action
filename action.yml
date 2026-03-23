@@ -40,15 +40,6 @@ inputs:
     required: false
     default: "auto-notion-sync/"
 
-  formatter:
-    description: "Formatter to use for _notion_links.md: 'prettier' (default), 'biome', or 'none'"
-    required: false
-    default: "prettier"
-
-  formatter_config:
-    description: "Optional formatter config path (relative to the repository root)"
-    required: false
-
   github_token:
     description: "GitHub token used to push commits or open PRs for notion_page_id updates"
     required: false
@@ -81,6 +72,4 @@ runs:
         INPUT_TITLE_PREFIX_SEPARATOR: ${{ inputs.title_prefix_separator }}
         INPUT_COMMIT_STRATEGY: ${{ inputs.commit_strategy }}
         INPUT_PR_BRANCH_PREFIX: ${{ inputs.pr_branch_prefix }}
-        INPUT_FORMATTER: ${{ inputs.formatter }}
-        INPUT_FORMATTER_CONFIG: ${{ inputs.formatter_config }}
         INPUT_GITHUB_TOKEN: ${{ inputs.github_token }}

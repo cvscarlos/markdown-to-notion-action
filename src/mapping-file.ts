@@ -3,39 +3,10 @@ import { execFile } from "child_process";
 import * as fs from "fs/promises";
 import * as path from "path";
 import { promisify } from "util";
-import type { FormatterChoice } from "./action-inputs.js";
 import { normalizeNotionId, notionPageUrl, toDashedId } from "./notion-api.js";
 import type { MappingEntry } from "./sync-types.js";
 
-type FormatterOption = {
-  command: string;
-  displayName: string;
-  formatArgs: string[];
-};
-
-type FormatterSettings = {
-  command: string;
-  displayName: string;
-  baseArgs: string[];
-  configFlag: string;
-};
-
 const execFileAsync = promisify(execFile);
-
-const FORMATTER_SETTINGS: Record<Exclude<FormatterChoice, "none">, FormatterSettings> = {
-  prettier: {
-    command: "prettier",
-    displayName: "Prettier",
-    baseArgs: ["--write"],
-    configFlag: "--config",
-  },
-  biome: {
-    command: "@biomejs/biome",
-    displayName: "Biome",
-    baseArgs: ["format", "--write"],
-    configFlag: "--config-path",
-  },
-};
 
 export function resolveMappingFilePath(
   docsFolderPath: string,
@@ -117,69 +88,20 @@ export async function writeMappingFile(
   await fs.writeFile(mappingFilePath, lines, "utf8");
 }
 
-export async function formatMappingFileIfFormatterAvailable(
+export async function formatMappingFile(
   mappingFilePath: string,
   workspaceRoot: string,
-  formatterChoice: FormatterChoice,
-  formatterConfigPath: string | null,
 ): Promise<void> {
-  if (formatterChoice === "none") {
-    core.info("Formatter disabled. Skipping mapping file formatting.");
-    return;
-  }
-
-  const formatter = buildFormatterOption(formatterChoice, formatterConfigPath);
-  core.info(`Formatting mapping file with ${formatter.displayName}: ${mappingFilePath}`);
-  if (formatterConfigPath) {
-    core.info(`Using ${formatter.displayName} config: ${formatterConfigPath}`);
-  }
-
-  const result = await runFormatterCommand(formatter, mappingFilePath, workspaceRoot);
-  if (result.success) {
-    core.info(`Formatted mapping file with ${formatter.displayName}.`);
-    return;
-  }
-
-  const errorSuffix = result.error ? ` (${result.error})` : "";
-  core.warning(`${formatter.displayName} failed to format${errorSuffix}.`);
-}
-
-function buildFormatterOption(
-  formatterChoice: FormatterChoice,
-  formatterConfigPath: string | null,
-): FormatterOption {
-  const settings = FORMATTER_SETTINGS[formatterChoice as Exclude<FormatterChoice, "none">];
-  if (!settings) {
-    throw new Error(`Unsupported formatter selection: ${formatterChoice}`);
-  }
-
-  const args = [...settings.baseArgs];
-  if (formatterConfigPath) {
-    args.push(settings.configFlag, formatterConfigPath);
-  }
-
-  return {
-    command: settings.command,
-    displayName: settings.displayName,
-    formatArgs: args,
-  };
-}
-
-async function runFormatterCommand(
-  formatter: FormatterOption,
-  mappingFilePath: string,
-  workspaceRoot: string,
-): Promise<{ success: boolean; error?: string }> {
-  const commandArgs = ["--yes", formatter.command, ...formatter.formatArgs, mappingFilePath];
+  core.info(`Formatting mapping file with Prettier: ${mappingFilePath}`);
   try {
-    await execFileAsync("npx", commandArgs, {
+    await execFileAsync("npx", ["--yes", "prettier", "--write", mappingFilePath], {
       cwd: workspaceRoot,
       env: process.env,
     });
-    return { success: true };
+    core.info("Formatted mapping file with Prettier.");
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return { success: false, error: message };
+    core.warning(`Prettier failed to format (${message}).`);
   }
 }
 

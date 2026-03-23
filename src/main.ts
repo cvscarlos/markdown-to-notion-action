@@ -5,11 +5,9 @@ import * as path from "path";
 
 import {
   normalizeCommitStrategy,
-  normalizeFormatterChoice,
   normalizePrBranchPrefix,
   normalizeTitlePrefixSeparator,
   readInput,
-  resolveFormatterConfigPath,
 } from "./action-inputs.js";
 import type { CommitStrategy } from "./action-inputs.js";
 import { appendBlocksSafe, appendPageLinksAfterAnchor } from "./block-sync.js";
@@ -23,7 +21,7 @@ import {
 import { commitAndPush, commitAndPushToBranch, getCurrentBranch } from "./git-utils.js";
 import { createLogContext, describeError } from "./logging.js";
 import {
-  formatMappingFileIfFormatterAvailable,
+  formatMappingFile,
   normalizeMappingKey,
   readMappingFile,
   resolveMappingFilePath,
@@ -90,11 +88,6 @@ async function run(): Promise<void> {
 
     const titlePrefixSeparator = normalizeTitlePrefixSeparator(titlePrefixSeparatorInput);
     const prBranchPrefix = normalizePrBranchPrefix(prBranchPrefixInput);
-    const formatterChoice = normalizeFormatterChoice(readInput("formatter", ["FORMATTER"]));
-    const formatterConfigPath = resolveFormatterConfigPath(
-      readInput("formatter_config", ["FORMATTER_CONFIG"]),
-      workspaceRoot,
-    );
 
     const markdownFiles = await collectMarkdownFiles(docsFolderPath, mappingFilePath);
     if (!markdownFiles.length) {
@@ -238,12 +231,7 @@ async function run(): Promise<void> {
     if (mappingDirty) {
       await writeMappingFile(mappingFilePath, mappingEntries);
       if (commitStrategy !== "none") {
-        await formatMappingFileIfFormatterAvailable(
-          mappingFilePath,
-          workspaceRoot,
-          formatterChoice,
-          formatterConfigPath,
-        );
+        await formatMappingFile(mappingFilePath, workspaceRoot);
       }
       changedFiles.push(path.relative(workspaceRoot, mappingFilePath));
     }
