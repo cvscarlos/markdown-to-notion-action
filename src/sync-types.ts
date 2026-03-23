@@ -1,8 +1,9 @@
 export type MarkdownDocument = {
   absPath: string;
-  relPath: string;
-  body: string;
   attributes: Record<string, unknown>;
+  body: string;
+  relPath: string;
+  sourceHash: string;
   title: string;
   notionPageId?: string;
   notionUrl?: string;
@@ -10,6 +11,7 @@ export type MarkdownDocument = {
 
 export type MappingEntry = {
   pageId: string;
+  sourceHash?: string;
   title?: string;
 };
 

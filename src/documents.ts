@@ -1,5 +1,6 @@
 import * as core from "@actions/core";
 import { Client } from "@notionhq/client";
+import { createHash } from "crypto";
 import * as frontMatter from "front-matter";
 import * as fs from "fs/promises";
 import * as path from "path";
@@ -86,6 +87,7 @@ export async function loadMarkdownDocuments(
       attributes: frontMatterAttributes,
       body: markdownBody,
       relPath,
+      sourceHash: hashMarkdownBody(markdownBody),
       title,
       notionPageId,
       notionUrl: notionPageId ? notionPageUrl(notionPageId) : undefined,
@@ -186,4 +188,8 @@ function buildGitHubRawUrl(repoRelativePath: string): string | null {
     return `https://raw.githubusercontent.com/${ownerRepo}/${ref}/${normalizedPath}`;
   }
   return `${serverUrl}/raw/${ownerRepo}/${ref}/${normalizedPath}`;
+}
+
+function hashMarkdownBody(markdownBody: string): string {
+  return createHash("sha256").update(markdownBody, "utf8").digest("hex");
 }

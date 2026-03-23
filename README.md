@@ -5,7 +5,7 @@ Sync a folder of Markdown files to Notion pages and optionally maintain an index
 This action:
 
 - Creates or updates one Notion page per Markdown file.
-- Stores `notion_page_id` mappings in a separate markdown table file (default: `_notion_links.md`).
+- Stores `notion_page_id` mappings and `source_hash` values in a separate markdown table file (default: `_notion_links.md`).
 - Adds optional shortcut links after an anchor block (optional).
 - Validates links to avoid Notion "Invalid URL" errors.
 
@@ -135,15 +135,15 @@ Each `.md` file is parsed for frontmatter:
 - If `notion_page_id` exists (in the mapping file or frontmatter) → the page is updated.
 - If missing → a new Notion page is created and the mapping file is updated.
 
-**Mapping file:** Instead of writing `notion_page_id` into each Markdown file, the action stores mappings in a separate markdown table (default: `_notion_links.md`). This avoids modifying your docs content.
+**Mapping file:** Instead of writing `notion_page_id` into each Markdown file, the action stores mappings in a separate markdown table (default: `_notion_links.md`). This avoids modifying your docs content and lets repeated runs skip unchanged files by comparing the stored `source_hash` locally before calling GitHub or Notion.
 
 Example mapping file (the `title` column links to the Notion page URL):
 
 ```markdown
-| path                         | notion_page_id                       | title                                                                                 |
-| ---------------------------- | ------------------------------------ | ------------------------------------------------------------------------------------- |
-| getting-started.md           | 7754cf02-251f-4bc9-ab2f-9cc897765336 | [Getting Started](https://www.notion.so/7754cf02251f4bc9ab2f9cc897765336)             |
-| integrations/example-tags.md | 30c5e554-8603-8072-a733-d3bad8109a32 | [integrations → Example Tags](https://www.notion.so/30c5e55486038072a733d3bad8109a32) |
+| path                         | notion_page_id                       | source_hash                                                      | title                                                                                 |
+| ---------------------------- | ------------------------------------ | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| getting-started.md           | 7754cf02-251f-4bc9-ab2f-9cc897765336 | 8f0f3d3c1c2c0531c8dc37d975d6e7c1f6f1b0ed3e3618b2af896cb8da4f8a7f | [Getting Started](https://www.notion.so/7754cf02251f4bc9ab2f9cc897765336)             |
+| integrations/example-tags.md | 30c5e554-8603-8072-a733-d3bad8109a32 | 6e8a960b8a4e2ce4adac9b6f55b0b7159d4a6a7f7bfa815f6c0a3186fdcb1d06 | [integrations → Example Tags](https://www.notion.so/30c5e55486038072a733d3bad8109a32) |
 ```
 
 ### 2) Title Selection

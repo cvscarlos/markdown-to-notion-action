@@ -119,49 +119,56 @@ async function run(): Promise<void> {
       try {
         const documentLog = createLogContext(documentEntry.relPath);
         documentLog.info(`Sync start: ${documentEntry.title}`);
+        const mappingKey = normalizeMappingKey(documentEntry.relPath);
         const pageTitle = buildNotionPageTitle(documentEntry, titlePrefixSeparator);
         let pageId = documentEntry.notionPageId;
         let pageUrl = documentEntry.notionUrl;
         let pageWasWritten = false;
+        const existingMapping = mappingEntries.get(mappingKey);
 
         if (pageId) {
-          const decision = await getSyncDecision(
-            notion,
-            pageId,
-            documentEntry.absPath,
-            githubToken,
-            workspaceRoot,
-            documentLog,
-          );
-
-          if (decision.archivedOrMissing) {
-            documentLog.warn(`Notion page missing or archived, recreating: ${pageTitle}`);
-            pageId = undefined;
-          } else if (decision.skipSync) {
-            documentLog.info("Skipping sync: Notion is up to date.");
+          if (existingMapping?.sourceHash === documentEntry.sourceHash) {
+            documentLog.info("Skipping sync: source hash unchanged.");
             pageUrl = pageUrl ?? notionPageUrl(pageId);
           } else {
-            const blocks = await buildBlocksForDocument(
+            const decision = await getSyncDecision(
               notion,
-              documentEntry,
-              docsFolderPath,
-              workspaceRoot,
-              knownPageUrls,
+              pageId,
+              documentEntry.absPath,
               githubToken,
+              workspaceRoot,
               documentLog,
             );
 
-            try {
-              await updatePageContent(notion, pageId, pageTitle, blocks, documentLog);
-              pageUrl = notionPageUrl(pageId);
-              pageWasWritten = true;
-              documentLog.info(`Updated page: ${pageTitle}`);
-            } catch (error) {
-              if (!isNotionArchivedError(error) && !isNotionNotFoundError(error)) {
-                throw error;
-              }
+            if (decision.archivedOrMissing) {
               documentLog.warn(`Notion page missing or archived, recreating: ${pageTitle}`);
               pageId = undefined;
+            } else if (decision.skipSync) {
+              documentLog.info("Skipping sync: Notion is up to date.");
+              pageUrl = pageUrl ?? notionPageUrl(pageId);
+            } else {
+              const blocks = await buildBlocksForDocument(
+                notion,
+                documentEntry,
+                docsFolderPath,
+                workspaceRoot,
+                knownPageUrls,
+                githubToken,
+                documentLog,
+              );
+
+              try {
+                await updatePageContent(notion, pageId, pageTitle, blocks, documentLog);
+                pageUrl = notionPageUrl(pageId);
+                pageWasWritten = true;
+                documentLog.info(`Updated page: ${pageTitle}`);
+              } catch (error) {
+                if (!isNotionArchivedError(error) && !isNotionNotFoundError(error)) {
+                  throw error;
+                }
+                documentLog.warn(`Notion page missing or archived, recreating: ${pageTitle}`);
+                pageId = undefined;
+              }
             }
           }
         }
@@ -189,18 +196,25 @@ async function run(): Promise<void> {
 
         if (pageId && pageUrl) {
           knownPageUrls.set(documentEntry.absPath, pageUrl);
-          const mappingKey = normalizeMappingKey(documentEntry.relPath);
           const normalizedPageId = normalizeNotionId(pageId);
-          const existingMapping = mappingEntries.get(mappingKey);
 
-          if (!existingMapping || normalizeNotionId(existingMapping.pageId) !== normalizedPageId) {
+          if (
+            !existingMapping ||
+            normalizeNotionId(existingMapping.pageId) !== normalizedPageId ||
+            existingMapping.sourceHash !== documentEntry.sourceHash
+          ) {
             mappingEntries.set(mappingKey, {
               pageId: normalizedPageId,
+              sourceHash: documentEntry.sourceHash,
               title: pageWasWritten ? pageTitle : (existingMapping?.title ?? pageTitle),
             });
             mappingDirty = true;
           } else if (pageWasWritten && existingMapping.title !== pageTitle) {
-            mappingEntries.set(mappingKey, { pageId: normalizedPageId, title: pageTitle });
+            mappingEntries.set(mappingKey, {
+              pageId: normalizedPageId,
+              sourceHash: documentEntry.sourceHash,
+              title: pageTitle,
+            });
             mappingDirty = true;
           }
 

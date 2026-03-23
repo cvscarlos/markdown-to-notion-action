@@ -70,6 +70,7 @@ export async function readMappingFile(mappingFilePath: string): Promise<Map<stri
     const idIndex = headerMap.findIndex((value) =>
       ["notion_page_id", "notion_page", "notion_id"].includes(value),
     );
+    const sourceHashIndex = headerMap.findIndex((value) => value === "source_hash");
     const titleIndex = headerMap.findIndex((value) => value === "title");
     if (pathIndex === -1 || idIndex === -1) {
       return new Map();
@@ -86,8 +87,13 @@ export async function readMappingFile(mappingFilePath: string): Promise<Map<stri
       try {
         const normalizedPath = normalizeMappingKey(rawPath);
         const normalizedId = normalizeNotionId(rawId);
+        const sourceHash = sourceHashIndex >= 0 ? row[sourceHashIndex]?.trim() : undefined;
         const title = titleIndex >= 0 ? row[titleIndex]?.trim() : undefined;
-        entries.set(normalizedPath, { pageId: normalizedId, title });
+        entries.set(normalizedPath, {
+          pageId: normalizedId,
+          sourceHash: sourceHash || undefined,
+          title,
+        });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         core.warning(`Invalid notion_page_id in mapping file for ${rawPath}: ${message}`);
@@ -236,12 +242,13 @@ function isSeparatorRow(line: string): boolean {
 
 function buildMappingTable(entries: Map<string, MappingEntry>): string {
   const rows = Array.from(entries.entries()).sort((left, right) => left[0].localeCompare(right[0]));
-  const lines = ["| path | notion_page_id | title |", "| --- | --- | --- |"];
+  const lines = ["| path | notion_page_id | source_hash | title |", "| --- | --- | --- | --- |"];
   for (const [relPath, entry] of rows) {
+    const sourceHash = entry.sourceHash ?? "";
     const title = entry.title ?? "";
     const pageUrl = notionPageUrl(entry.pageId);
     const linkedTitle = title ? `[${title}](${pageUrl})` : pageUrl;
-    lines.push(`| ${relPath} | ${toDashedId(entry.pageId)} | ${linkedTitle} |`);
+    lines.push(`| ${relPath} | ${toDashedId(entry.pageId)} | ${sourceHash} | ${linkedTitle} |`);
   }
   return `${lines.join("\n")}\n`;
 }
