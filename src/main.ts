@@ -34,12 +34,13 @@ import {
   notionPageUrl,
 } from "./notion-api.js";
 import {
+  archivePageIfPresent,
   createPage,
   getSyncDecision,
   resolveParentPageId,
   updatePageContent,
 } from "./page-sync.js";
-import type { SyncedPage } from "./sync-types.js";
+import type { MappingEntry, SyncedPage } from "./sync-types.js";
 
 async function run(): Promise<void> {
   try {
@@ -107,6 +108,9 @@ async function run(): Promise<void> {
     const changedFiles: string[] = [];
     const syncedPages: SyncedPage[] = [];
     let mappingDirty = false;
+    const currentMappingKeys = new Set<string>(
+      documents.map((documentEntry) => normalizeMappingKey(documentEntry.relPath)),
+    );
 
     for (const documentEntry of documents) {
       try {
@@ -228,6 +232,15 @@ async function run(): Promise<void> {
       );
     }
 
+    const removedStaleMappings = await removeStaleMappings(
+      notion,
+      mappingEntries,
+      currentMappingKeys,
+    );
+    if (removedStaleMappings) {
+      mappingDirty = true;
+    }
+
     if (mappingDirty) {
       await writeMappingFile(mappingFilePath, mappingEntries);
       if (commitStrategy !== "none") {
@@ -322,6 +335,47 @@ async function persistNotionIds(
     body: "Automated update of notion_page_id frontmatter for synced docs.",
   });
   core.info(`Opened PR: ${pullRequest.data.html_url}`);
+}
+
+async function removeStaleMappings(
+  notion: Client,
+  mappingEntries: Map<string, MappingEntry>,
+  currentMappingKeys: Set<string>,
+): Promise<boolean> {
+  const staleMappings = Array.from(mappingEntries.entries()).filter(
+    ([mappingKey]) => !currentMappingKeys.has(mappingKey),
+  );
+  if (!staleMappings.length) {
+    return false;
+  }
+
+  const activePageIds = new Set<string>();
+  for (const [mappingKey, mappingEntry] of mappingEntries.entries()) {
+    if (!currentMappingKeys.has(mappingKey)) {
+      continue;
+    }
+    activePageIds.add(normalizeNotionId(mappingEntry.pageId));
+  }
+
+  let removedMappings = false;
+  for (const [stalePath, staleEntry] of staleMappings) {
+    const staleLog = createLogContext(stalePath);
+    const normalizedPageId = normalizeNotionId(staleEntry.pageId);
+    if (activePageIds.has(normalizedPageId)) {
+      staleLog.info(
+        `Removing stale mapping row for path that no longer exists. Page ${normalizedPageId} is still referenced by another active markdown file.`,
+      );
+    } else {
+      staleLog.info(
+        "Markdown file no longer exists. Archiving the mapped Notion page and removing the stale mapping row.",
+      );
+      await archivePageIfPresent(notion, normalizedPageId, staleLog);
+    }
+    mappingEntries.delete(stalePath);
+    removedMappings = true;
+  }
+
+  return removedMappings;
 }
 
 run();

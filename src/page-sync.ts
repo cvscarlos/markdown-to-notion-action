@@ -4,6 +4,7 @@ import { syncPageBlocks } from "./block-sync.js";
 import { getLastCommitTime } from "./git-utils.js";
 import { defaultLogContext } from "./logging.js";
 import {
+  isNotionArchivedError,
   isNotionNotFoundError,
   normalizeNotionId,
   notionRequest,
@@ -74,6 +75,35 @@ export async function createPage(
     id: response.id,
     url: "url" in response ? response.url : null,
   };
+}
+
+export async function archivePageIfPresent(
+  notion: Client,
+  pageId: string,
+  logContext: LogContext = defaultLogContext,
+): Promise<"already-gone" | "archived"> {
+  try {
+    /**
+     * Notion API: Move a page to trash
+     * https://developers.notion.com/reference/patch-page.md
+     */
+    await notionRequest(
+      () =>
+        notion.pages.update({
+          in_trash: true,
+          page_id: toDashedId(pageId),
+        }),
+      `pages.update trash ${pageId}`,
+    );
+    logContext.info(`Archived stale page: ${pageId}`);
+    return "archived";
+  } catch (error) {
+    if (isNotionArchivedError(error) || isNotionNotFoundError(error)) {
+      logContext.info(`Stale page already missing or archived: ${pageId}`);
+      return "already-gone";
+    }
+    throw error;
+  }
 }
 
 export async function updatePageContent(

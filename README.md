@@ -6,6 +6,7 @@ This action:
 
 - Creates or updates one Notion page per Markdown file.
 - Stores `notion_page_id` mappings and `source_hash` values in a separate markdown table file (default: `_notion_links.md`).
+- Archives stale Notion pages when their mapped Markdown file no longer exists, then removes the stale mapping row.
 - Adds optional shortcut links after an anchor block (optional).
 - Validates links to avoid Notion "Invalid URL" errors.
 
@@ -130,6 +131,8 @@ Each `.md` file is parsed for frontmatter:
 - If missing → a new Notion page is created and the mapping file is updated.
 
 **Mapping file:** Instead of writing `notion_page_id` into each Markdown file, the action stores mappings in a separate markdown table (default: `_notion_links.md`). This avoids modifying your docs content and lets repeated runs skip unchanged files by comparing the stored `source_hash` locally before calling GitHub or Notion.
+
+If a path exists in `_notion_links.md` but the Markdown file no longer exists in `docs_folder`, the action treats that row as stale. It removes the row from `_notion_links.md` and archives the mapped Notion page. If the page was already deleted or archived manually in Notion, the action just removes the stale row and continues.
 
 Example mapping file (the `title` column links to the Notion page URL):
 
@@ -256,6 +259,7 @@ If the GitHub API lookup is unavailable, it falls back to local `git log`, which
 
 - The index link list after `page_block_id` is replaced each run (contiguous `link_to_page` blocks only).
 - Pages are skipped when Notion is newer than the last Git commit time.
+- If a mapped Markdown path is renamed or deleted, the old mapping row is removed. Its Notion page is archived unless that same page ID is still referenced by another active Markdown file.
 - If a block append fails, the action logs a warning and continues.
 - HTML in Markdown is not preserved.
 
