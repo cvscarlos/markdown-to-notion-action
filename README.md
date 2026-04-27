@@ -215,6 +215,9 @@ To get a block ID:
 - `npm run format`
 - `npm run format:check`
 - `npm run typecheck`
+- `npm run knip`
+- `npm run precommit`
+- `npm run hooks:install` to enable the local Git pre-commit hook
 - `./.github/update-v1-tag.sh`
 
 ## Troubleshooting

@@ -1,9 +1,9 @@
 import * as core from "@actions/core";
 import { execFile } from "child_process";
 import * as fs from "fs/promises";
-import * as path from "path";
 import { promisify } from "util";
 import { normalizeNotionId, notionPageUrl, toDashedId } from "./notion-api.js";
+import { resolveChildPath, resolveInsideRoot } from "./path-utils.js";
 import type { MappingEntry } from "./sync-types.js";
 
 const execFileAsync = promisify(execFile);
@@ -20,12 +20,9 @@ export function resolveMappingFilePath(
 ): string {
   const trimmed = input.trim();
   if (!trimmed) {
-    return path.join(docsFolderPath, "_notion_links.md");
+    return resolveChildPath(docsFolderPath, "_notion_links.md");
   }
-  if (path.isAbsolute(trimmed)) {
-    return trimmed;
-  }
-  return path.resolve(workspaceRoot, trimmed);
+  return resolveInsideRoot(workspaceRoot, trimmed, "notion_mapping_file");
 }
 
 export function normalizeMappingKey(relPath: string): string {

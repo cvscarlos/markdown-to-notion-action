@@ -40,6 +40,7 @@ import {
   resolveParentPageId,
   updatePageContent,
 } from "./page-sync.js";
+import { resolveInsideRoot } from "./path-utils.js";
 import type { MappingEntry, SyncedPage } from "./sync-types.js";
 
 async function run(): Promise<void> {
@@ -76,7 +77,7 @@ async function run(): Promise<void> {
 
     const notion = new Client({ auth: notionToken });
     const workspaceRoot = process.env.GITHUB_WORKSPACE || process.cwd();
-    const docsFolderPath = path.resolve(workspaceRoot, docsFolder);
+    const docsFolderPath = resolveInsideRoot(workspaceRoot, docsFolder, "docs_folder");
     await ensureDirectoryExists(docsFolderPath);
     const mappingFilePath = resolveMappingFilePath(docsFolderPath, workspaceRoot, mappingFileInput);
 

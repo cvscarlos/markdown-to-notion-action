@@ -12,6 +12,7 @@
     "format:check": "prettier --check .",
     "typecheck": "tsc --noEmit",
     "knip": "knip",
+    "hooks:install": "git config core.hooksPath .githooks",
     "precommit": "npm run format && npm run typecheck && npm run lint && npm run knip"
   },
   "dependencies": {
@@ -38,5 +39,8 @@
     "prettier": "^3.8.3",
     "semantic-release": "^25.0.3",
     "typescript": "^5.9.3"
+  },
+  "overrides": {
+    "katex": "0.16.45"
   }
 }

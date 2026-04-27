@@ -8,6 +8,7 @@ import { markdownToNotionBlocks, extractTitle } from "./markdown-to-notion.js";
 import { uploadImageBlocks } from "./image-uploads.js";
 import { normalizeNotionId, notionPageUrl } from "./notion-api.js";
 import { normalizeMappingKey } from "./mapping-file.js";
+import { isInsidePath, isSamePath, resolveChildPath, resolveFromDirectory } from "./path-utils.js";
 import type { LogContext } from "./logging.js";
 import type { NotionBlock } from "./notion-types.js";
 import type { MappingEntry, MarkdownDocument } from "./sync-types.js";
@@ -32,7 +33,7 @@ export async function collectMarkdownFiles(
   const entries = await fs.readdir(dirPath, { withFileTypes: true });
   const files: string[] = [];
   for (const entry of entries) {
-    const fullPath = path.join(dirPath, entry.name);
+    const fullPath = resolveChildPath(dirPath, entry.name);
     if (entry.isDirectory()) {
       if (entry.name === "node_modules" || entry.name.startsWith(".")) {
         continue;
@@ -41,7 +42,7 @@ export async function collectMarkdownFiles(
       continue;
     }
     if (entry.isFile() && entry.name.toLowerCase().endsWith(".md")) {
-      if (path.resolve(fullPath) === path.resolve(mappingFilePath)) {
+      if (isSamePath(fullPath, mappingFilePath)) {
         continue;
       }
       files.push(fullPath);
@@ -153,9 +154,13 @@ function resolveRelativeLink(
     return null;
   }
 
-  const resolvedPath = path.resolve(path.dirname(currentFilePath), cleaned);
-  const relativePath = path.relative(docsRoot, resolvedPath);
-  if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
+  let resolvedPath: string;
+  try {
+    resolvedPath = resolveFromDirectory(path.dirname(currentFilePath), cleaned);
+  } catch {
+    return null;
+  }
+  if (!isInsidePath(docsRoot, resolvedPath)) {
     return null;
   }
 
@@ -164,7 +169,7 @@ function resolveRelativeLink(
   }
 
   const repoRelativePath = path.relative(workspaceRoot, resolvedPath);
-  if (repoRelativePath.startsWith("..") || path.isAbsolute(repoRelativePath)) {
+  if (!isInsidePath(workspaceRoot, resolvedPath)) {
     return null;
   }
 
