@@ -1,0 +1,9 @@
+{
+  "$schema": "https://raw.githubusercontent.com/webpro-nl/knip/main/packages/knip/schema.json",
+  "project": ["src/**/*.ts"],
+  "ignoreDependencies": [
+    "@semantic-release/commit-analyzer",
+    "@semantic-release/github",
+    "@semantic-release/release-notes-generator"
+  ]
+}
