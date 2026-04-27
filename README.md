@@ -134,7 +134,7 @@ Each `.md` file is parsed for frontmatter:
 
 If a path exists in `_notion_links.md` but the Markdown file no longer exists in `docs_folder`, the action treats that row as stale. It removes the row from `_notion_links.md` and archives the mapped Notion page. If the page was already deleted or archived manually in Notion, the action just removes the stale row and continues.
 
-Example mapping file (the `title` column links to the Notion page URL):
+Example mapping file (the `title` column links to the Notion page URL). The `title` column is generated only for human readers. The action does not use it for page identity or change detection:
 
 ```markdown
 | path                         | notion_page_id                       | source_hash                                                      | title                                                                                 |

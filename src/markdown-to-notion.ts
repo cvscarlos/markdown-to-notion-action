@@ -2,9 +2,9 @@ import MarkdownIt from "markdown-it";
 import { markdownToBlocks } from "@tryfabric/martian";
 import type { NotionBlock, NotionRichText } from "./notion-types.js";
 
-export type Logger = (message: string) => void;
+type Logger = (message: string) => void;
 
-export type MarkdownToNotionOptions = {
+type MarkdownToNotionOptions = {
   resolveLink?: (href: string) => string | null;
   logger?: Logger;
 };

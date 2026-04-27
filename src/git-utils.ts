@@ -86,11 +86,6 @@ export async function getCurrentBranch(repoRoot?: string): Promise<string> {
   return branchResult.stdout.trim();
 }
 
-export async function getShortSha(repoRoot?: string): Promise<string> {
-  const shaResult = await runCommand("git", ["rev-parse", "--short", "HEAD"], repoRoot);
-  return shaResult.stdout.trim();
-}
-
 export async function getLastCommitTime(
   filePath: string,
   repoRoot?: string,

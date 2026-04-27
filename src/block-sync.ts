@@ -52,7 +52,7 @@ type NormalizedBlock = {
   type: string;
 };
 
-export async function clearChildren(
+async function clearChildren(
   notion: Client,
   blockId: string,
   logContext: LogContext = defaultLogContext,

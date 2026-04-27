@@ -95,7 +95,8 @@ async function run(): Promise<void> {
       core.warning(`No markdown files found in ${docsFolderPath}.`);
     }
 
-    const mappingEntries = await readMappingFile(mappingFilePath);
+    const mappingReadResult = await readMappingFile(mappingFilePath);
+    const mappingEntries = mappingReadResult.entries;
     const documents = await loadMarkdownDocuments(markdownFiles, docsFolderPath, mappingEntries);
 
     const knownPageUrls = new Map<string, string>();
@@ -107,7 +108,7 @@ async function run(): Promise<void> {
 
     const changedFiles: string[] = [];
     const syncedPages: SyncedPage[] = [];
-    let mappingDirty = false;
+    let mappingDirty = mappingReadResult.needsRewrite;
     const currentMappingKeys = new Set<string>(
       documents.map((documentEntry) => normalizeMappingKey(documentEntry.relPath)),
     );
@@ -120,7 +121,6 @@ async function run(): Promise<void> {
         const pageTitle = buildNotionPageTitle(documentEntry, titlePrefixSeparator);
         let pageId = documentEntry.notionPageId;
         let pageUrl = documentEntry.notionUrl;
-        let pageWasWritten = false;
         const existingMapping = mappingEntries.get(mappingKey);
 
         if (pageId) {
@@ -157,7 +157,6 @@ async function run(): Promise<void> {
               try {
                 await updatePageContent(notion, pageId, pageTitle, blocks, documentLog);
                 pageUrl = notionPageUrl(pageId);
-                pageWasWritten = true;
                 documentLog.info(`Updated page: ${pageTitle}`);
               } catch (error) {
                 if (!isNotionArchivedError(error) && !isNotionNotFoundError(error)) {
@@ -188,7 +187,6 @@ async function run(): Promise<void> {
             documentLog.info(`Page URL: ${pageUrl}`);
           }
           await appendBlocksSafe(notion, pageId, blocks, documentLog);
-          pageWasWritten = true;
         }
 
         if (pageId && pageUrl) {
@@ -198,15 +196,9 @@ async function run(): Promise<void> {
           if (
             !existingMapping ||
             normalizeNotionId(existingMapping.pageId) !== normalizedPageId ||
-            existingMapping.sourceHash !== documentEntry.sourceHash
+            existingMapping.sourceHash !== documentEntry.sourceHash ||
+            existingMapping.title !== pageTitle
           ) {
-            mappingEntries.set(mappingKey, {
-              pageId: normalizedPageId,
-              sourceHash: documentEntry.sourceHash,
-              title: pageWasWritten ? pageTitle : (existingMapping?.title ?? pageTitle),
-            });
-            mappingDirty = true;
-          } else if (pageWasWritten && existingMapping.title !== pageTitle) {
             mappingEntries.set(mappingKey, {
               pageId: normalizedPageId,
               sourceHash: documentEntry.sourceHash,

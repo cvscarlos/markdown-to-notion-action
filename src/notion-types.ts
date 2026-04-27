@@ -1,105 +1,99 @@
-export const NOTION_COLORS = [
-  "default",
-  "gray",
-  "brown",
-  "orange",
-  "yellow",
-  "green",
-  "blue",
-  "purple",
-  "pink",
-  "red",
-  "default_background",
-  "gray_background",
-  "brown_background",
-  "orange_background",
-  "yellow_background",
-  "green_background",
-  "blue_background",
-  "purple_background",
-  "pink_background",
-  "red_background",
-] as const;
+type NotionColor =
+  | "blue"
+  | "blue_background"
+  | "brown"
+  | "brown_background"
+  | "default"
+  | "default_background"
+  | "gray"
+  | "gray_background"
+  | "green"
+  | "green_background"
+  | "orange"
+  | "orange_background"
+  | "pink"
+  | "pink_background"
+  | "purple"
+  | "purple_background"
+  | "red"
+  | "red_background"
+  | "yellow"
+  | "yellow_background";
 
-export type NotionColor = (typeof NOTION_COLORS)[number];
-
-export const NOTION_CODE_LANGUAGES = [
-  "abap",
-  "arduino",
-  "bash",
-  "basic",
-  "c",
-  "clojure",
-  "coffeescript",
-  "c++",
-  "c#",
-  "css",
-  "dart",
-  "diff",
-  "docker",
-  "elixir",
-  "elm",
-  "erlang",
-  "flow",
-  "fortran",
-  "f#",
-  "gherkin",
-  "glsl",
-  "go",
-  "graphql",
-  "groovy",
-  "haskell",
-  "html",
-  "java",
-  "javascript",
-  "json",
-  "julia",
-  "kotlin",
-  "latex",
-  "less",
-  "lisp",
-  "livescript",
-  "lua",
-  "makefile",
-  "markdown",
-  "markup",
-  "matlab",
-  "mermaid",
-  "nix",
-  "objective-c",
-  "ocaml",
-  "pascal",
-  "perl",
-  "php",
-  "plain text",
-  "powershell",
-  "prolog",
-  "protobuf",
-  "python",
-  "r",
-  "reason",
-  "ruby",
-  "rust",
-  "sass",
-  "scala",
-  "scheme",
-  "scss",
-  "shell",
-  "solidity",
-  "sql",
-  "swift",
-  "toml",
-  "typescript",
-  "vb.net",
-  "verilog",
-  "vhdl",
-  "visual basic",
-  "webassembly",
-  "xml",
-  "yaml",
-] as const;
-
-export type NotionCodeLanguage = (typeof NOTION_CODE_LANGUAGES)[number];
+type NotionCodeLanguage =
+  | "abap"
+  | "arduino"
+  | "bash"
+  | "basic"
+  | "c"
+  | "c#"
+  | "c++"
+  | "clojure"
+  | "coffeescript"
+  | "css"
+  | "dart"
+  | "diff"
+  | "docker"
+  | "elixir"
+  | "elm"
+  | "erlang"
+  | "f#"
+  | "flow"
+  | "fortran"
+  | "gherkin"
+  | "glsl"
+  | "go"
+  | "graphql"
+  | "groovy"
+  | "haskell"
+  | "html"
+  | "java"
+  | "javascript"
+  | "json"
+  | "julia"
+  | "kotlin"
+  | "latex"
+  | "less"
+  | "lisp"
+  | "livescript"
+  | "lua"
+  | "makefile"
+  | "markdown"
+  | "markup"
+  | "matlab"
+  | "mermaid"
+  | "nix"
+  | "objective-c"
+  | "ocaml"
+  | "pascal"
+  | "perl"
+  | "php"
+  | "plain text"
+  | "powershell"
+  | "prolog"
+  | "protobuf"
+  | "python"
+  | "r"
+  | "reason"
+  | "ruby"
+  | "rust"
+  | "sass"
+  | "scala"
+  | "scheme"
+  | "scss"
+  | "shell"
+  | "solidity"
+  | "sql"
+  | "swift"
+  | "toml"
+  | "typescript"
+  | "vb.net"
+  | "verilog"
+  | "vhdl"
+  | "visual basic"
+  | "webassembly"
+  | "xml"
+  | "yaml";
 
 export type NotionRichText = {
   type: "text";
@@ -119,11 +113,11 @@ export type NotionRichText = {
   href?: string | null;
 };
 
-export type NotionBlockBase = {
+type NotionBlockBase = {
   object?: "block";
 };
 
-export type ParagraphBlock = {
+type ParagraphBlock = {
   type: "paragraph";
   paragraph: {
     rich_text: NotionRichText[];
@@ -132,7 +126,7 @@ export type ParagraphBlock = {
   };
 } & NotionBlockBase;
 
-export type HeadingBlock = {
+type HeadingBlock = {
   type: "heading_1" | "heading_2" | "heading_3";
   heading_1?: {
     rich_text: NotionRichText[];
@@ -154,7 +148,7 @@ export type HeadingBlock = {
   };
 } & NotionBlockBase;
 
-export type BulletedListItemBlock = {
+type BulletedListItemBlock = {
   type: "bulleted_list_item";
   bulleted_list_item: {
     rich_text: NotionRichText[];
@@ -163,7 +157,7 @@ export type BulletedListItemBlock = {
   };
 } & NotionBlockBase;
 
-export type NumberedListItemBlock = {
+type NumberedListItemBlock = {
   type: "numbered_list_item";
   numbered_list_item: {
     rich_text: NotionRichText[];
@@ -172,7 +166,7 @@ export type NumberedListItemBlock = {
   };
 } & NotionBlockBase;
 
-export type QuoteBlock = {
+type QuoteBlock = {
   type: "quote";
   quote: {
     rich_text: NotionRichText[];
@@ -181,7 +175,7 @@ export type QuoteBlock = {
   };
 } & NotionBlockBase;
 
-export type CalloutBlock = {
+type CalloutBlock = {
   type: "callout";
   callout: {
     rich_text: NotionRichText[];
@@ -197,7 +191,7 @@ export type CalloutBlock = {
   };
 } & NotionBlockBase;
 
-export type ToggleBlock = {
+type ToggleBlock = {
   type: "toggle";
   toggle: {
     rich_text: NotionRichText[];
@@ -206,7 +200,7 @@ export type ToggleBlock = {
   };
 } & NotionBlockBase;
 
-export type ToDoBlock = {
+type ToDoBlock = {
   type: "to_do";
   to_do: {
     rich_text: NotionRichText[];
@@ -216,12 +210,12 @@ export type ToDoBlock = {
   };
 } & NotionBlockBase;
 
-export type DividerBlock = {
+type DividerBlock = {
   type: "divider";
   divider: Record<string, never>;
 } & NotionBlockBase;
 
-export type CodeBlock = {
+type CodeBlock = {
   type: "code";
   code: {
     rich_text: NotionRichText[];
@@ -230,14 +224,14 @@ export type CodeBlock = {
   };
 } & NotionBlockBase;
 
-export type EquationBlock = {
+type EquationBlock = {
   type: "equation";
   equation: {
     expression: string;
   };
 } & NotionBlockBase;
 
-export type ImageBlock = {
+type ImageBlock = {
   type: "image";
   image: {
     type: "external" | "file" | "file_upload";
@@ -248,14 +242,14 @@ export type ImageBlock = {
   };
 } & NotionBlockBase;
 
-export type TableRowBlock = {
+type TableRowBlock = {
   type: "table_row";
   table_row: {
     cells: NotionRichText[][];
   };
 } & NotionBlockBase;
 
-export type TableBlock = {
+type TableBlock = {
   type: "table";
   table: {
     table_width: number;
@@ -265,14 +259,14 @@ export type TableBlock = {
   };
 } & NotionBlockBase;
 
-export type TableOfContentsBlock = {
+type TableOfContentsBlock = {
   type: "table_of_contents";
   table_of_contents: {
     color?: NotionColor;
   };
 } & NotionBlockBase;
 
-export type LinkToPageBlock = {
+type LinkToPageBlock = {
   type: "link_to_page";
   link_to_page: {
     type: "page_id" | "database_id";

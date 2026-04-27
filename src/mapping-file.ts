@@ -8,6 +8,11 @@ import type { MappingEntry } from "./sync-types.js";
 
 const execFileAsync = promisify(execFile);
 
+type MappingFileReadResult = {
+  entries: Map<string, MappingEntry>;
+  needsRewrite: boolean;
+};
+
 export function resolveMappingFilePath(
   docsFolderPath: string,
   workspaceRoot: string,
@@ -27,12 +32,12 @@ export function normalizeMappingKey(relPath: string): string {
   return relPath.replace(/\\/g, "/");
 }
 
-export async function readMappingFile(mappingFilePath: string): Promise<Map<string, MappingEntry>> {
+export async function readMappingFile(mappingFilePath: string): Promise<MappingFileReadResult> {
   try {
     const content = await fs.readFile(mappingFilePath, "utf8");
     const parsed = parseMappingTable(content);
     if (!parsed) {
-      return new Map();
+      return { entries: new Map(), needsRewrite: false };
     }
 
     const { header, rows } = parsed;
@@ -44,10 +49,11 @@ export async function readMappingFile(mappingFilePath: string): Promise<Map<stri
     const sourceHashIndex = headerMap.findIndex((value) => value === "source_hash");
     const titleIndex = headerMap.findIndex((value) => value === "title");
     if (pathIndex === -1 || idIndex === -1) {
-      return new Map();
+      return { entries: new Map(), needsRewrite: false };
     }
 
     const entries = new Map<string, MappingEntry>();
+    let needsRewrite = false;
     for (const row of rows) {
       const rawPath = row[pathIndex]?.trim();
       const rawId = row[idIndex]?.trim();
@@ -59,7 +65,11 @@ export async function readMappingFile(mappingFilePath: string): Promise<Map<stri
         const normalizedPath = normalizeMappingKey(rawPath);
         const normalizedId = normalizeNotionId(rawId);
         const sourceHash = sourceHashIndex >= 0 ? row[sourceHashIndex]?.trim() : undefined;
-        const title = titleIndex >= 0 ? row[titleIndex]?.trim() : undefined;
+        const rawTitle = titleIndex >= 0 ? row[titleIndex]?.trim() : undefined;
+        const title = normalizeMappingTitle(rawTitle, normalizedId);
+        if (rawTitle && rawTitle !== buildTitleCell(normalizedId, title)) {
+          needsRewrite = true;
+        }
         entries.set(normalizedPath, {
           pageId: normalizedId,
           sourceHash: sourceHash || undefined,
@@ -70,11 +80,11 @@ export async function readMappingFile(mappingFilePath: string): Promise<Map<stri
         core.warning(`Invalid notion_page_id in mapping file for ${rawPath}: ${message}`);
       }
     }
-    return entries;
+    return { entries, needsRewrite };
   } catch (error) {
     const errorDetails = error as { code?: string };
     if (errorDetails.code === "ENOENT") {
-      return new Map();
+      return { entries: new Map(), needsRewrite: false };
     }
     throw error;
   }
@@ -162,15 +172,80 @@ function isSeparatorRow(line: string): boolean {
   return stripped.length === 0;
 }
 
+function normalizeMappingTitle(value: string | undefined, pageId: string): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  let title = value.trim();
+  while (true) {
+    const markdownLink = parseMarkdownLink(title);
+    if (!markdownLink) {
+      break;
+    }
+    validateTitleLinkTarget(markdownLink.target, pageId);
+    title = markdownLink.label.trim();
+  }
+
+  if (isNotionUrl(title)) {
+    validateTitleLinkTarget(title, pageId);
+    return undefined;
+  }
+
+  return title || undefined;
+}
+
+function parseMarkdownLink(value: string): { label: string; target: string } | null {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("[") || !trimmed.endsWith(")")) {
+    return null;
+  }
+
+  const targetSeparatorIndex = trimmed.lastIndexOf("](");
+  if (targetSeparatorIndex <= 0) {
+    return null;
+  }
+
+  const label = trimmed.slice(1, targetSeparatorIndex);
+  const target = trimmed.slice(targetSeparatorIndex + 2, -1).trim();
+  if (!label || !target) {
+    return null;
+  }
+
+  return { label, target };
+}
+
+function validateTitleLinkTarget(target: string, pageId: string): void {
+  try {
+    const linkedPageId = normalizeNotionId(target);
+    if (linkedPageId !== pageId) {
+      core.warning(
+        `Mapping title link points to ${toDashedId(linkedPageId)}, but notion_page_id is ${toDashedId(pageId)}.`,
+      );
+    }
+  } catch {
+    if (isNotionUrl(target)) {
+      core.warning(`Mapping title link has an invalid Notion URL: ${target}`);
+    }
+  }
+}
+
+function isNotionUrl(value: string): boolean {
+  return /^https:\/\/(?:www\.)?notion\.(?:so|site)\//i.test(value.trim());
+}
+
 function buildMappingTable(entries: Map<string, MappingEntry>): string {
   const rows = Array.from(entries.entries()).sort((left, right) => left[0].localeCompare(right[0]));
   const lines = ["| path | notion_page_id | source_hash | title |", "| --- | --- | --- | --- |"];
   for (const [relPath, entry] of rows) {
     const sourceHash = entry.sourceHash ?? "";
-    const title = entry.title ?? "";
-    const pageUrl = notionPageUrl(entry.pageId);
-    const linkedTitle = title ? `[${title}](${pageUrl})` : pageUrl;
-    lines.push(`| ${relPath} | ${toDashedId(entry.pageId)} | ${sourceHash} | ${linkedTitle} |`);
+    const titleCell = buildTitleCell(entry.pageId, entry.title);
+    lines.push(`| ${relPath} | ${toDashedId(entry.pageId)} | ${sourceHash} | ${titleCell} |`);
   }
   return `${lines.join("\n")}\n`;
+}
+
+function buildTitleCell(pageId: string, title: string | undefined): string {
+  const pageUrl = notionPageUrl(pageId);
+  return title ? `[${title}](${pageUrl})` : pageUrl;
 }

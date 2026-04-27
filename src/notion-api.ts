@@ -1,11 +1,11 @@
 import { Client } from "@notionhq/client";
 
-export type AppendChildrenRequest = Parameters<Client["blocks"]["children"]["append"]>[0];
+type AppendChildrenRequest = Parameters<Client["blocks"]["children"]["append"]>[0];
 export type AppendChildren = AppendChildrenRequest["children"];
-export type BlocksChildrenListResponse = Awaited<ReturnType<Client["blocks"]["children"]["list"]>>;
+type BlocksChildrenListResponse = Awaited<ReturnType<Client["blocks"]["children"]["list"]>>;
 export type PartialBlockObjectResponse = BlocksChildrenListResponse["results"][number];
 export type BlockUpdateRequest = Parameters<Client["blocks"]["update"]>[0];
-export type CalloutUpdateRequest = Extract<BlockUpdateRequest, { callout: unknown }>;
+type CalloutUpdateRequest = Extract<BlockUpdateRequest, { callout: unknown }>;
 export type CalloutIconRequest = CalloutUpdateRequest["callout"] extends { icon?: infer T }
   ? T
   : never;
